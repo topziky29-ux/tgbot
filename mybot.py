@@ -4,6 +4,12 @@ import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import asyncio
+import aiohttp
+import io
+import pdfplumber
+import re
+import os
+from typing import Dict, List
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,7 +26,22 @@ MAIN_ADMIN_ID = 1246951810
 ADMIN_IDS = [MAIN_ADMIN_ID]
 
 # Список доступных групп
-GROUPS = ["ПСН-24", "ПСН-23", "ПСН-25", "ТСН-25", "ТСН-24", "ТСН-23", "СТН-25"]
+GROUPS = ["ПСН-24", "ПСН-23", "ПСН-25", "ТСН-24", "ТСН-23", "СТН-25"]
+
+# Ссылки на расписание для каждой группы
+SCHEDULE_LINKS = {
+    "ПСН-24": "https://tf.rsatu.ru/download/rasp/PSN-24.pdf",
+    "ПСН-23": "https://tf.rsatu.ru/download/rasp/PSN-23.pdf", 
+    "ПСН-25": "https://tf.rsatu.ru/download/rasp/PSN-25.pdf",
+    "СТН-25": "https://tf.rsatu.ru/download/rasp/STN-25.pdf",
+    "ТСН-24": "https://tf.rsatu.ru/download/rasp/TSN-24.pdf",
+    "ТСН-23": "https://tf.rsatu.ru/download/rasp/TSN-23.pdf",
+}
+
+# Глобальная переменная для хранения расписания
+SCHEDULE_CACHE = {}
+LAST_UPDATE_TIME = None
+CACHE_DURATION = timedelta(hours=6)  # Обновлять кэш каждые 6 часов
 
 # Дата начала учебного года
 def get_academic_year_start():
@@ -41,34 +62,236 @@ def get_current_week():
     
     return week_number, "Четная" if is_even_week else "Нечетная"
 
-# Расписание для ПСН-24
-SCHEDULE = {
-    "ПСН-24": {
-        "Четная": {
-            "Понедельник": "1. Разговор о важном (411)\n2. Основы алгоритмизации и программирования (411)\n3. Физическая культура (1 п/гр)",
-            "Вторник": "1. Классный час (411)\n2. Информационные технологии (411)\n3. Архитектура аппаратных средств (410)",
-            "Среда": "1. 1С: Предприятие (411)\n2. Основы алгоритмизации и программирования (420)\n3. Информационные технологии (411)",
-            "Четверг": "1. История (512)\n2. История (512)",
-            "Пятница": "1. Физическая культура (2 п/гр) 18:30-20:05",
-            "Суббота": "Выходной",
-            "Воскресенье": "Выходной"
-        },
-        "Нечетная": {
-            "Понедельник": "1. Основы алгоритмизации и программирования (511)\n2. Элементы высшей математики (511)\n3. Математическое моделирование (413)",
-            "Вторник": "1. 3D-моделирование (413)\n2. Математическое моделирование (511)\n3. Элементы высшей математики (511)",
-            "Среда": "1. Иностранный язык (408/403)\n2. Теория вероятностей (511)\n3. 1С: Предприятие (411) / Основы алгоритмизации (413)",
-            "Четверг": "1. Теория вероятностей (511)\n2. 1С: Предприятие (411) / Основы алгоритмизации (413)",
-            "Пятница": "Выходной",
-            "Суббота": "Выходной",
-            "Воскресенье": "Выходной"
-        }
-    }
-}
+# Функция для скачивания PDF
+async def download_pdf(url: str) -> bytes:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                return await response.read()
+            else:
+                raise Exception(f"Ошибка загрузки PDF: {response.status}")
 
-# Заполняем расписание для остальных групп
-for group in GROUPS:
-    if group not in SCHEDULE:
-        SCHEDULE[group] = SCHEDULE["ПСН-24"]
+# УЛУЧШЕННАЯ функция для парсинга PDF
+def parse_pdf_schedule(pdf_content: bytes, group_name: str) -> Dict:
+    schedule = {"Четная": {}, "Нечетная": {}}
+    
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    full_text += page_text + "\n"
+            
+            logger.info(f"Текст из PDF для {group_name} (первые 1000 символов): {full_text[:1000]}")
+            
+            # Более агрессивный парсинг
+            days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]
+            days_en = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
+            
+            # Разделяем на четную и нечетную недели
+            even_week_text = ""
+            odd_week_text = ""
+            
+            # Ищем разделители недель
+            if "Четная" in full_text or "чётная" in full_text or "ЧЕТНАЯ" in full_text:
+                parts = re.split(r'Четная|чётная|ЧЕТНАЯ', full_text)
+                if len(parts) > 1:
+                    even_week_text = parts[1]
+                    if "Нечетная" in even_week_text or "нечетная" in even_week_text:
+                        even_parts = re.split(r'Нечетная|нечетная', even_week_text)
+                        even_week_text = even_parts[0]
+                        if len(even_parts) > 1:
+                            odd_week_text = even_parts[1]
+                if "Нечетная" in full_text or "нечетная" in full_text:
+                    parts = re.split(r'Нечетная|нечетная', full_text)
+                    if len(parts) > 1:
+                        odd_week_text = parts[1]
+            else:
+                # Если нет явных разделителей, пробуем другие методы
+                lines = full_text.split('\n')
+                current_week = None
+                week_text = {"Четная": [], "Нечетная": []}
+                
+                for line in lines:
+                    line_lower = line.lower()
+                    if any(word in line_lower for word in ["четная", "чётная"]):
+                        current_week = "Четная"
+                    elif any(word in line_lower for word in ["нечетная", "нечётная"]):
+                        current_week = "Нечетная"
+                    elif current_week:
+                        week_text[current_week].append(line)
+                
+                even_week_text = "\n".join(week_text["Четная"])
+                odd_week_text = "\n".join(week_text["Нечетная"])
+            
+            # Если не удалось разделить, используем весь текст для обеих недель
+            if not even_week_text and not odd_week_text:
+                even_week_text = full_text
+                odd_week_text = full_text
+            
+            # Парсим каждую неделю
+            def parse_week_schedule(week_text, week_name):
+                week_schedule = {}
+                
+                for i, day_ru in enumerate(days_ru):
+                    day_en = days_en[i]
+                    day_pattern = f"{day_ru}|{day_en}|{day_ru[:3]}"
+                    
+                    # Ищем блок с днем недели
+                    day_match = re.search(f'({day_pattern}).*?(?={days_ru[(i+1)%6]}|{days_en[(i+1)%6]}|$)', 
+                                         week_text, re.IGNORECASE | re.DOTALL)
+                    
+                    if day_match:
+                        day_content = day_match.group(0)
+                        # Извлекаем пары
+                        pairs = []
+                        lines = day_content.split('\n')
+                        
+                        for line in lines:
+                            line_clean = line.strip()
+                            if (len(line_clean) > 10 and 
+                                not any(word in line_clean.lower() for word in days_ru + ["четная", "нечетная", "расписание"]) and
+                                not re.match(r'^\s*$', line_clean)):
+                                pairs.append(line_clean)
+                        
+                        if pairs:
+                            week_schedule[day_en] = "\n".join(pairs[:6])  # Максимум 6 пар
+                        else:
+                            week_schedule[day_en] = "Пар нет"
+                    else:
+                        week_schedule[day_en] = "Пар нет"
+                
+                return week_schedule
+            
+            # Парсим обе недели
+            schedule["Четная"] = parse_week_schedule(even_week_text, "Четная")
+            schedule["Нечетная"] = parse_week_schedule(odd_week_text, "Нечетная")
+            
+            # Если все дни "Пар нет", используем альтернативный метод
+            if all(day == "Пар нет" for day in schedule["Четная"].values()):
+                logger.info("Первый метод не сработал, пробуем альтернативный...")
+                schedule = alternative_parse(full_text, group_name)
+            
+            logger.info(f"УСПЕШНО распарсено для {group_name}: Четная - {len(schedule['Четная'])} дней, Нечетная - {len(schedule['Нечетная'])} дней")
+            
+            return schedule
+            
+    except Exception as e:
+        logger.error(f"Ошибка парсинга PDF для {group_name}: {e}")
+        # Пробуем альтернативный метод
+        try:
+            return alternative_parse(pdf_content, group_name)
+        except:
+            # Возвращаем базовую структуру
+            base_schedule = {"Четная": {}, "Нечетная": {}}
+            days_en = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
+            for week_type in base_schedule:
+                for day in days_en:
+                    base_schedule[week_type][day] = "Ошибка загрузки расписания"
+            return base_schedule
+
+# Альтернативный метод парсинга
+def alternative_parse(text, group_name):
+    schedule = {"Четная": {}, "Нечетная": {}}
+    days_en = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
+    
+    # Простой поиск по ключевым словам
+    lines = text.split('\n')
+    current_day = None
+    current_week = "Четная"
+    
+    for line in lines:
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+            
+        # Проверяем день недели
+        for day in days_en:
+            if day.lower() in line_clean.lower():
+                current_day = day
+                if current_day not in schedule[current_week]:
+                    schedule[current_week][current_day] = []
+                break
+        
+        # Проверяем тип недели
+        if any(word in line_clean.lower() for word in ["четная", "чётная"]):
+            current_week = "Четная"
+            current_day = None
+        elif any(word in line_clean.lower() for word in ["нечетная", "нечётная"]):
+            current_week = "Нечетная"
+            current_day = None
+        
+        # Добавляем как пару если это не день недели и не тип недели
+        elif (current_day and 
+              len(line_clean) > 5 and 
+              not any(word in line_clean.lower() for word in ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "расписание"])):
+            if isinstance(schedule[current_week][current_day], list):
+                schedule[current_week][current_day].append(line_clean)
+    
+    # Преобразуем списки в строки
+    for week_type in schedule:
+        for day in days_en:
+            if day in schedule[week_type] and isinstance(schedule[week_type][day], list):
+                if schedule[week_type][day]:
+                    schedule[week_type][day] = "\n".join(schedule[week_type][day][:6])
+                else:
+                    schedule[week_type][day] = "Пар нет"
+            elif day not in schedule[week_type]:
+                schedule[week_type][day] = "Пар нет"
+    
+    return schedule
+
+# Функция для получения расписания
+async def get_schedule(group_name: str) -> Dict:
+    global SCHEDULE_CACHE, LAST_UPDATE_TIME
+    
+    # Проверяем кэш
+    if (LAST_UPDATE_TIME and 
+        datetime.now() - LAST_UPDATE_TIME < CACHE_DURATION and 
+        group_name in SCHEDULE_CACHE):
+        return SCHEDULE_CACHE[group_name]
+    
+    try:
+        if group_name not in SCHEDULE_LINKS:
+            return {"Четная": {}, "Нечетная": {}}
+        
+        # Скачиваем PDF
+        pdf_content = await download_pdf(SCHEDULE_LINKS[group_name])
+        
+        # Парсим расписание
+        schedule = parse_pdf_schedule(pdf_content, group_name)
+        
+        # Обновляем кэш
+        SCHEDULE_CACHE[group_name] = schedule
+        LAST_UPDATE_TIME = datetime.now()
+        
+        return schedule
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения расписания для {group_name}: {e}")
+        # Возвращаем кэшированное расписание или пустое
+        return SCHEDULE_CACHE.get(group_name, {"Четная": {}, "Нечетная": {}})
+
+# Функция для принудительного обновления всех расписаний
+async def update_all_schedules():
+    global SCHEDULE_CACHE, LAST_UPDATE_TIME
+    
+    logger.info("Начинаю обновление всех расписаний...")
+    
+    for group_name in GROUPS:
+        try:
+            if group_name in SCHEDULE_LINKS:
+                pdf_content = await download_pdf(SCHEDULE_LINKS[group_name])
+                schedule = parse_pdf_schedule(pdf_content, group_name)
+                SCHEDULE_CACHE[group_name] = schedule
+                logger.info(f"Обновлено расписание для {group_name}")
+                await asyncio.sleep(1)  # Задержка между запросами
+        except Exception as e:
+            logger.error(f"Ошибка обновления расписания для {group_name}: {e}")
+    
+    LAST_UPDATE_TIME = datetime.now()
+    logger.info("Обновление всех расписаний завершено")
 
 # Инициализация базы данных
 def init_db():
@@ -385,7 +608,8 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Кто я?", callback_data="whoami")],
         [InlineKeyboardButton("Какая сейчас неделя?", callback_data="current_week")],
         [InlineKeyboardButton("Сменить группу", callback_data="change_group")],
-        [InlineKeyboardButton("Расписание", callback_data="schedule")]
+        [InlineKeyboardButton("Расписание", callback_data="schedule")],
+        [InlineKeyboardButton("📎 Ссылка на расписание", callback_data="schedule_link")]
     ]
     
     # Безопасная проверка админа
@@ -415,7 +639,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Выдайте мне права администратора\n"
             "2. Разрешите отправлять сообщения\n\n"
             "ℹ️ Бот будет присылать расписание и рассылку в эту беседу.\n"
-            "💬 Для личного использования напишите мне в личные сообщения."
+            "💬 Для личного использования напишите мне в личные сообщения.\n\n"
+            "⚠️ Я могу работать только в личных сообщениях. "
+            "Напишите мне в ЛС для полного доступа к функциям бота."
         )
         
         await update.message.reply_text(welcome_text)
@@ -517,6 +743,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_group_selection(query)
         elif query.data == "schedule":
             await show_today_schedule(query, user)
+        elif query.data == "schedule_link":
+            await show_schedule_link(query, user)
         elif query.data == "main_menu":
             await main_menu(update, context)
         elif query.data == "admin_panel":
@@ -539,6 +767,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await main_menu(update, context)
         elif query.data == "confirm_broadcast":
             await confirm_broadcast(update, context)
+        elif query.data == "admin_update_schedules":
+            await update_schedules_command(update, context)
         elif query.data.startswith("broadcast_group_"):
             group_name = query.data.replace("broadcast_group_", "")
             context.user_data['selected_groups'] = [group_name]
@@ -587,8 +817,10 @@ async def show_bot_info(query):
         "• Ежедневная рассылка расписания\n"
         "• Выбор и смена группы\n"
         "• Информация о пользователе\n"
-        "• Определение четности недели\n\n"
-        "Бот разработан для удобного доступа к расписанию занятий."
+        "• Определение четности недели\n"
+        "• Автоматическое обновление расписания из PDF\n\n"
+        "Бот разработан для удобного доступа к расписанию занятий.\n\n"
+        "👨‍💻 Владелец/разработчик - @bokalpivka"
     )
     await query.edit_message_text(
         info_text,
@@ -650,11 +882,49 @@ async def show_today_schedule(query, user):
     today = get_russian_weekday()
     week_number, week_type = get_current_week()
     
-    if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and today in SCHEDULE[group_name][week_type]:
-        schedule_text = SCHEDULE[group_name][week_type][today]
-        message = f"📅 Расписание на сегодня ({today}) для группы {group_name}:\n\n{schedule_text}\n\n({week_type} неделя, неделя №{week_number})"
+    # Получаем актуальное расписание
+    schedule = await get_schedule(group_name)
+    
+    if schedule and week_type in schedule and today in schedule[week_type]:
+        schedule_text = schedule[week_type][today]
+        message = (
+            f"📅 Расписание на сегодня ({today}) для группы {group_name}:\n\n"
+            f"{schedule_text}\n\n"
+            f"({week_type} неделя, неделя №{week_number})\n\n"
+            f"📎 Полное расписание: {SCHEDULE_LINKS.get(group_name, 'Не найдено')}"
+        )
     else:
-        message = f"На сегодня ({today}) расписание для группы {group_name} не найдено."
+        message = (
+            f"На сегодня ({today}) расписание для группы {group_name} не найдено.\n\n"
+            f"📎 Полное расписание: {SCHEDULE_LINKS.get(group_name, 'Не найдено')}"
+        )
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
+    )
+
+# Показать ссылку на расписание
+async def show_schedule_link(query, user):
+    user_data = get_user(user.id)
+    if not user_data or len(user_data) <= 3 or not user_data[3]:
+        await query.edit_message_text(
+            "Сначала выберите группу!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Выбрать группу", callback_data="select_group")]])
+        )
+        return
+    
+    group_name = user_data[3]
+    link = SCHEDULE_LINKS.get(group_name)
+    
+    if link:
+        message = (
+            f"📎 Ссылка на расписание для группы {group_name}:\n\n"
+            f"{link}\n\n"
+            f"Расписание автоматически обновляется каждые 6 часов."
+        )
+    else:
+        message = f"Ссылка на расписание для группы {group_name} не найдена."
     
     await query.edit_message_text(
         message,
@@ -671,6 +941,7 @@ async def show_admin_panel(query, user):
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("📢 Рассылка сообщения", callback_data="admin_broadcast")],
         [InlineKeyboardButton("📅 Рассылка расписания", callback_data="admin_schedule_broadcast")],
+        [InlineKeyboardButton("🔄 Обновить расписания", callback_data="admin_update_schedules")],
         [InlineKeyboardButton("🔨 Забанить студента", callback_data="admin_ban")],
         [InlineKeyboardButton("🔓 Разбанить студента", callback_data="admin_unban")],
     ]
@@ -683,6 +954,29 @@ async def show_admin_panel(query, user):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("👑 Админ-панель:", reply_markup=reply_markup)
+
+# Обновление расписаний
+async def update_schedules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("Доступ запрещен!")
+        return
+    
+    await query.edit_message_text("🔄 Начинаю обновление расписаний...")
+    
+    try:
+        await update_all_schedules()
+        await query.edit_message_text(
+            "✅ Расписания успешно обновлены!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+        )
+    except Exception as e:
+        await query.edit_message_text(
+            f"❌ Ошибка при обновлении расписаний: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+        )
 
 # Статистика
 async def show_admin_stats(query):
@@ -698,6 +992,14 @@ async def show_admin_stats(query):
     chats = get_all_chats()
     total_chats = len(chats)
     
+    # Информация о кэше расписаний
+    cache_info = ""
+    if LAST_UPDATE_TIME:
+        cache_age = datetime.now() - LAST_UPDATE_TIME
+        cache_info = f"\n🕐 Кэш расписаний: обновлен {int(cache_age.total_seconds() / 60)} минут назад"
+    else:
+        cache_info = "\n🕐 Кэш расписаний: не обновлялся"
+    
     group_stats = {}
     for user in users:
         if len(user) > 3 and user[3]:
@@ -711,7 +1013,8 @@ async def show_admin_stats(query):
         f"Заблокированных: {banned_users}\n"
         f"Администраторов: {admin_users}\n\n"
         f"💬 Чаты:\n"
-        f"Всего: {total_chats}\n\n"
+        f"Всего: {total_chats}"
+        f"{cache_info}\n\n"
         f"📚 По группам:\n"
     )
     
@@ -1020,8 +1323,11 @@ async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
         if len(user_data) > 3 and user_data[3]:
             user_id, username, first_name, group_name, last_active = user_data[0], user_data[1], user_data[2], user_data[3], user_data[4]
             
-            if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and weekday in SCHEDULE[group_name][week_type]:
-                schedule_text = SCHEDULE[group_name][week_type][weekday]
+            # Получаем актуальное расписание
+            schedule = await get_schedule(group_name)
+            
+            if schedule and week_type in schedule and weekday in schedule[week_type]:
+                schedule_text = schedule[week_type][weekday]
                 message = (
                     f"📅 Расписание на завтра ({weekday}) для группы {group_name}:\n\n"
                     f"{schedule_text}\n\n"
@@ -1067,6 +1373,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Основная функция
 def main():
+    # Установка необходимых библиотек
+    try:
+        import pdfplumber
+        import aiohttp
+    except ImportError:
+        print("Установите необходимые библиотеки:")
+        print("pip install pdfplumber aiohttp")
+        return
+    
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -1080,7 +1395,10 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_daily(send_daily_schedule, time=datetime.strptime("19:00", "%H:%M").time())
+        # Автоматическое обновление расписаний каждые 6 часов
+        job_queue.run_repeating(update_all_schedules, interval=timedelta(hours=6), first=10)
         print("Ежедневная рассылка настроена на 19:00")
+        print("Автоматическое обновление расписаний каждые 6 часов")
     else:
         print("Предупреждение: JobQueue не доступна")
     
