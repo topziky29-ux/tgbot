@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 import asyncio
 import os
 import re
+import random
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,10 +31,60 @@ USER_VIP_MODE = {}
 # Время рассылки по умолчанию
 BROADCAST_TIME = "19:00"
 
+# Виртуальная валюта пользователей
+USER_BALANCE = {}
+
+# Игровые сессии
+BLACKJACK_SESSIONS = {}
+SLOT_SESSIONS = {}
+ROULETTE_SESSIONS = {}
+
 # Дата начала учебного года
 def get_academic_year_start():
     now = datetime.now()
     return datetime(now.year, 9, 1) if now.month >= 9 else datetime(now.year - 1, 9, 1)
+
+# Функции для работы с виртуальной валютой
+def get_user_balance(user_id):
+    """Получить баланс пользователя"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 1000  # Стартовый баланс 1000
+    except Exception as e:
+        logger.error(f"Ошибка при получении баланса пользователя {user_id}: {e}")
+        return 1000
+
+def update_user_balance(user_id, amount):
+    """Обновить баланс пользователя"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Проверяем существование колонки balance
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        if 'balance' not in columns:
+            cursor.execute('ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 1000')
+            logger.info("Добавлена колонка balance в таблицу users")
+        
+        cursor.execute('UPDATE users SET balance = ? WHERE user_id = ?', (amount, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении баланса пользователя {user_id}: {e}")
+        return False
+
+def add_user_balance(user_id, amount):
+    """Добавить сумму к балансу пользователя"""
+    current_balance = get_user_balance(user_id)
+    new_balance = current_balance + amount
+    return update_user_balance(user_id, new_balance)
 
 # Расчет текущей учебной недели
 def get_current_week():
@@ -237,7 +288,7 @@ SCHEDULE = {
             "Понедельник": "1. Разговор о важном (420)\n   История России (512) 1-19 н.\n2. Математика в профессиональной деятельности (511) 1-19 н.\n3. Процессы формообразования и инструменты (420) 1 н.\n   Процессы формообразования и инструменты (420) 3,7,11,15,19 н. (2 п/гр)\n   Процессы формообразования и инструменты (420) 5,9,13,17 н. (1 п/гр)\n   Материаловедение (316) 3,7,11,15,19 н. (1 п/гр)\n4. Процессы формообразования и инструменты (420) 1 н.\n   Инженерная графика (420) 3-19 н. (1 п/гр)\n   Материаловедение (316) 3,7,11,15,19 н. (2 п/гр)",
             "Вторник": "2. Физическая культура 1-19 н.\n3. Инженерная графика (420) 1-17 н.\n   Процессы формообразования и инструменты (420) 19 н. (1 п/гр)\n   Материаловедение (316) 19 н. (2 п/гр)\n4. Процессы формообразования и инструменты (420) 1-19 н.\n5. Материаловедение (316) 1-17 н.\n   Материаловедение (316) 19 н. (1 п/гр)",
             "Среда": "1. Электротехника (201) 1-19 н.\n2. Метрология, стандартизация и сертификация (409) 1-19 н.\n3. Процессы формообразования и инструменты (420) 1-19 н.\n4. Иностранный язык (408/403) 1-19 н.",
-            "Четверг": "1. Техническая механика (218) 1-13,19 н.\n   Метрология, стандартизация и сертификация (409) 15,17 н.\n2. Материаловедение (316) 1-19 н.\n3. Безопасность жизнедеятельности (201) 1-19 н.\n4. Устройство ДВС (215) 1-19 н.",
+            "Четверг": "1. Техническая механика (218) 1-13,19 н.\n   Метрология, стандартизация и сертификация (409) 15,17 н.\n2. Материаловедение (316) 1-19 н.\n3. Безопасность жизнедедеятельности (201) 1-19 н.\n4. Устройство ДВС (215) 1-19 н.",
             "Пятница": "1. Безопасность жизнедеятельности (201) 1-19 н.\n2. Основы бережливого производства (410) 1-19 н.\n3. История России (512) 1-9 н.\n   Инженерная графика (420) 11-19 н. (2 п/гр)\n   Устройство ДВС (215) 11-19 н. (1 п/гр)\n4. Математика в профессиональной деятельности (511) 1-9 н.\n   Инженерная графика (420) 11-15 н. (1 п/гр)\n   Устройство ДВС (215) 11-19 н. (2 п/гр)",
             "Суббота": "Выходной",
             "Воскресенье": "Выходной"
@@ -316,7 +367,8 @@ def init_db():
             is_banned BOOLEAN DEFAULT FALSE,
             is_admin BOOLEAN DEFAULT FALSE,
             is_vip BOOLEAN DEFAULT FALSE,
-            is_main_admin BOOLEAN DEFAULT FALSE
+            is_main_admin BOOLEAN DEFAULT FALSE,
+            balance INTEGER DEFAULT 1000
         )
     ''')
     
@@ -341,13 +393,15 @@ def init_db():
         )
     ''')
     
-    # Исправленная таблица admin_logs
+    # ИСПРАВЛЕННАЯ таблица admin_logs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS admin_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_username TEXT,
             admin_user_id INTEGER,
             action TEXT,
+            target_username TEXT,
+            target_user_id INTEGER,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -363,6 +417,10 @@ def init_db():
     if 'is_main_admin' not in columns:
         cursor.execute('ALTER TABLE users ADD COLUMN is_main_admin BOOLEAN DEFAULT FALSE')
         logger.info("Добавлена колонка is_main_admin в таблицу users")
+    
+    if 'balance' not in columns:
+        cursor.execute('ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 1000')
+        logger.info("Добавлена колонка balance в таблицу users")
     
     # Проверяем и добавляем отсутствующие колонки в таблицу chats
     cursor.execute("PRAGMA table_info(chats)")
@@ -392,12 +450,20 @@ def init_db():
         cursor.execute('ALTER TABLE admin_logs ADD COLUMN action TEXT')
         logger.info("Добавлена колонка action в таблицу admin_logs")
     
+    if 'target_username' not in columns:
+        cursor.execute('ALTER TABLE admin_logs ADD COLUMN target_username TEXT')
+        logger.info("Добавлена колонка target_username в таблицу admin_logs")
+    
+    if 'target_user_id' not in columns:
+        cursor.execute('ALTER TABLE admin_logs ADD COLUMN target_user_id INTEGER')
+        logger.info("Добавлена колонка target_user_id в таблицу admin_logs")
+    
     # Добавляем главного администратора в базу если его нет
     cursor.execute('SELECT * FROM users WHERE user_id = ?', (MAIN_ADMIN_ID,))
     if not cursor.fetchone():
         cursor.execute('''
-            INSERT INTO users (user_id, username, first_name, group_name, is_admin, is_vip, is_main_admin)
-            VALUES (?, ?, ?, ?, TRUE, TRUE, TRUE)
+            INSERT INTO users (user_id, username, first_name, group_name, is_admin, is_vip, is_main_admin, balance)
+            VALUES (?, ?, ?, ?, TRUE, TRUE, TRUE, 10000)
         ''', (MAIN_ADMIN_ID, "bokalpivka", "Admin", "ПСН-24"))
         logger.info("Главный администратор добавлен в базу")
     
@@ -426,15 +492,15 @@ def get_all_chats_with_info():
         logger.error(f"Ошибка при получении информации о чатах: {e}")
         return []
 
-# Логирование действий администратора
-def log_admin_action(admin_username, admin_user_id, action):
+# ИСПРАВЛЕННАЯ функция логирования действий администратора
+def log_admin_action(admin_username, admin_user_id, action, target_username=None, target_user_id=None):
     try:
         conn = sqlite3.connect('university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO admin_logs (admin_username, admin_user_id, action)
-            VALUES (?, ?, ?)
-        ''', (admin_username, admin_user_id, action))
+            INSERT INTO admin_logs (admin_username, admin_user_id, action, target_username, target_user_id)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (admin_username, admin_user_id, action, target_username, target_user_id))
         conn.commit()
         conn.close()
         logger.info(f"Admin action logged: {admin_username} ({admin_user_id}) - {action}")
@@ -899,12 +965,17 @@ def is_chat_vip(chat_id):
         logger.error(f"Ошибка при проверке VIP статуса чата {chat_id}: {e}")
         return False
 
-# Получение логов администраторов
+# Получение логов администраторов (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 def get_admin_logs(limit=50):
     try:
         conn = sqlite3.connect('university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM admin_logs ORDER BY timestamp DESC LIMIT ?', (limit,))
+        cursor.execute('''
+            SELECT id, admin_username, admin_user_id, action, target_username, target_user_id, timestamp 
+            FROM admin_logs 
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        ''', (limit,))
         logs = cursor.fetchall()
         conn.close()
         return logs
@@ -984,7 +1055,7 @@ def parse_vip_schedule(schedule_text, current_week):
                     if 'н' in week_range:
                         week_str = week_range.split(' н')[0].strip()
                         if '-' in week_str:
-                            # Диапазон недель (например, "1-13")
+                            # Диагональ недель (например, "1-13")
                             try:
                                 start_week, end_week = map(int, week_str.split('-'))
                                 if start_week <= current_week <= end_week:
@@ -1026,7 +1097,576 @@ def get_vip_schedule(group_name, weekday, week_type, current_week):
         return vip_schedule
     return "На этот день пар нет! 🎉"
 
-# Главное меню
+# Команда /game - игровое меню (СКРЫТАЯ КОМАНДА)
+async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Безопасная проверка бана
+    try:
+        if is_banned(user.id):
+            await update.message.reply_text("❌ Вы заблокированы и не можете использовать бота.")
+            return
+    except Exception as e:
+        logger.error(f"Ошибка при проверке бана в /game: {e}")
+    
+    balance = get_user_balance(user.id)
+    
+    keyboard = [
+        [InlineKeyboardButton("🎮 Ганг Банг", callback_data="game_gangbang")],
+        [InlineKeyboardButton("🎰 Меллстрой Гейм", callback_data="game_mellstroy")],
+        [InlineKeyboardButton("💰 Мой баланс", callback_data="game_balance")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"🎮 ИГРОВОЙ ЦЕНТР МЕЛЛСТРОЙ\n\n"
+        f"💰 Ваш баланс: {balance} монет\n\n"
+        f"Выберите игру:",
+        reply_markup=reply_markup
+    )
+
+# Игры Меллстрой Гейм
+async def show_mellstroy_games(query, context):
+    user = query.from_user
+    balance = get_user_balance(user.id)
+    
+    keyboard = [
+        [InlineKeyboardButton("♠️ Блекджек", callback_data="game_blackjack")],
+        [InlineKeyboardButton("🎰 Слоты", callback_data="game_slots")],
+        [InlineKeyboardButton("🎡 Рулетка", callback_data="game_roulette")],
+        [InlineKeyboardButton("💰 Мой баланс", callback_data="game_balance")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="game_main")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🎰 МЕЛЛСТРОЙ КАЗИНО\n\n"
+        f"💰 Ваш баланс: {balance} монет\n\n"
+        f"Выберите игру:",
+        reply_markup=reply_markup
+    )
+
+# Игра Блекджек с выбором ставки
+async def start_blackjack(query, context):
+    user = query.from_user
+    balance = get_user_balance(user.id)
+    
+    if balance < 10:
+        await query.answer("❌ Недостаточно монет! Минимальная ставка 10.", show_alert=True)
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("10 монет", callback_data="blackjack_bet_10")],
+        [InlineKeyboardButton("25 монет", callback_data="blackjack_bet_25")],
+        [InlineKeyboardButton("50 монет", callback_data="blackjack_bet_50")],
+        [InlineKeyboardButton("100 монет", callback_data="blackjack_bet_100")],
+        [InlineKeyboardButton("200 монет", callback_data="blackjack_bet_200")],
+        [InlineKeyboardButton("500 монет", callback_data="blackjack_bet_500")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="game_mellstroy")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"♠️ БЛЕКДЖЕК\n\n"
+        f"💰 Ваш баланс: {balance} монет\n\n"
+        f"Выберите ставку:",
+        reply_markup=reply_markup
+    )
+
+async def play_blackjack(query, context):
+    user = query.from_user
+    bet_amount = int(query.data.split('_')[2])
+    balance = get_user_balance(user.id)
+    
+    if balance < bet_amount:
+        await query.answer("❌ Недостаточно монет!", show_alert=True)
+        return
+    
+    # Создаем колоду
+    deck = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'] * 4
+    
+    # Раздаем карты
+    player_hand = [random.choice(deck), random.choice(deck)]
+    dealer_hand = [random.choice(deck), random.choice(deck)]
+    
+    # Сохраняем сессию
+    BLACKJACK_SESSIONS[user.id] = {
+        'deck': deck,
+        'player_hand': player_hand,
+        'dealer_hand': dealer_hand,
+        'bet': bet_amount,
+        'player_score': calculate_blackjack_score(player_hand),
+        'dealer_score': calculate_blackjack_score([dealer_hand[0]])  # Только одна карта дилера видна
+    }
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Еще карту", callback_data="blackjack_hit")],
+        [InlineKeyboardButton("✋ Хватит", callback_data="blackjack_stand")],
+        [InlineKeyboardButton("🔙 Новая игра", callback_data="game_blackjack")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"♠️ БЛЕКДЖЕК - Ставка: {bet_amount} монет\n\n"
+        f"🃏 Ваши карты: {', '.join(player_hand)} (очки: {calculate_blackjack_score(player_hand)})\n"
+        f"🎭 Карта дилера: {dealer_hand[0]} ?\n\n"
+        f"Выберите действие:",
+        reply_markup=reply_markup
+    )
+
+def calculate_blackjack_score(hand):
+    """Подсчет очков в блекджеке"""
+    score = 0
+    aces = 0
+    
+    for card in hand:
+        if card in ['J', 'Q', 'K']:
+            score += 10
+        elif card == 'A':
+            aces += 1
+            score += 11
+        else:
+            score += int(card)
+    
+    # Корректируем тузы
+    while score > 21 and aces > 0:
+        score -= 10
+        aces -= 1
+    
+    return score
+
+async def blackjack_hit(query, context):
+    user = query.from_user
+    
+    if user.id not in BLACKJACK_SESSIONS:
+        await query.answer("❌ Сессия устарела!", show_alert=True)
+        return
+    
+    session = BLACKJACK_SESSIONS[user.id]
+    
+    # Игрок берет карту
+    new_card = random.choice(session['deck'])
+    session['player_hand'].append(new_card)
+    session['player_score'] = calculate_blackjack_score(session['player_hand'])
+    
+    # Проверяем перебор
+    if session['player_score'] > 21:
+        # Игрок проиграл
+        update_user_balance(user.id, get_user_balance(user.id) - session['bet'])
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Новая игра", callback_data="game_blackjack")],
+            [InlineKeyboardButton("🔙 В меню", callback_data="game_mellstroy")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"♠️ БЛЕКДЖЕК - ПЕРЕБОР!\n\n"
+            f"🃏 Ваши карты: {', '.join(session['player_hand'])} (очки: {session['player_score']})\n"
+            f"🎭 Карты дилера: {', '.join(session['dealer_hand'])} (очки: {calculate_blackjack_score(session['dealer_hand'])})\n\n"
+            f"💸 Вы проиграли {session['bet']} монет!\n"
+            f"💰 Новый баланс: {get_user_balance(user.id)} монет",
+            reply_markup=reply_markup
+        )
+        del BLACKJACK_SESSIONS[user.id]
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Еще карту", callback_data="blackjack_hit")],
+        [InlineKeyboardButton("✋ Хватит", callback_data="blackjack_stand")],
+        [InlineKeyboardButton("🔙 Новая игра", callback_data="game_blackjack")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"♠️ БЛЕКДЖЕК - Ставка: {session['bet']} монет\n\n"
+        f"🃏 Ваши карты: {', '.join(session['player_hand'])} (очки: {session['player_score']})\n"
+        f"🎭 Карта дилера: {session['dealer_hand'][0]} ?\n\n"
+        f"Выберите действие:",
+        reply_markup=reply_markup
+    )
+
+async def blackjack_stand(query, context):
+    user = query.from_user
+    
+    if user.id not in BLACKJACK_SESSIONS:
+        await query.answer("❌ Сессия устарела!", show_alert=True)
+        return
+    
+    session = BLACKJACK_SESSIONS[user.id]
+    
+    # Дилер добирает карты
+    dealer_score = calculate_blackjack_score(session['dealer_hand'])
+    while dealer_score < 17:
+        new_card = random.choice(session['deck'])
+        session['dealer_hand'].append(new_card)
+        dealer_score = calculate_blackjack_score(session['dealer_hand'])
+    
+    player_score = session['player_score']
+    
+    # Определяем победителя
+    if dealer_score > 21:
+        result = "win"
+        win_amount = session['bet'] * 2
+        message = f"🎉 Дилер перебрал! Вы выиграли {win_amount} монет!"
+        add_user_balance(user.id, win_amount)
+    elif player_score > dealer_score:
+        result = "win"
+        win_amount = session['bet'] * 2
+        message = f"🎉 Вы выиграли! {win_amount} монет!"
+        add_user_balance(user.id, win_amount)
+    elif player_score == dealer_score:
+        result = "push"
+        message = "🤝 Ничья! Ставка возвращена."
+    else:
+        result = "lose"
+        message = f"💸 Вы проиграли {session['bet']} монет!"
+        update_user_balance(user.id, get_user_balance(user.id) - session['bet'])
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Новая игра", callback_data="game_blackjack")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="game_mellstroy")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"♠️ БЛЕКДЖЕК - РЕЗУЛЬТАТ\n\n"
+        f"🃏 Ваши карты: {', '.join(session['player_hand'])} (очки: {player_score})\n"
+        f"🎭 Карты дилера: {', '.join(session['dealer_hand'])} (очки: {dealer_score})\n\n"
+        f"{message}\n"
+        f"💰 Новый баланс: {get_user_balance(user.id)} монет",
+        reply_markup=reply_markup
+    )
+    del BLACKJACK_SESSIONS[user.id]
+
+# Игра Слоты с выбором ставки
+async def start_slots(query, context):
+    user = query.from_user
+    balance = get_user_balance(user.id)
+    
+    if balance < 10:
+        await query.answer("❌ Недостаточно монет! Минимальная ставка 10.", show_alert=True)
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("10 монет", callback_data="slots_bet_10")],
+        [InlineKeyboardButton("25 монет", callback_data="slots_bet_25")],
+        [InlineKeyboardButton("50 монет", callback_data="slots_bet_50")],
+        [InlineKeyboardButton("100 монет", callback_data="slots_bet_100")],
+        [InlineKeyboardButton("200 монет", callback_data="slots_bet_200")],
+        [InlineKeyboardButton("500 монет", callback_data="slots_bet_500")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="game_mellstroy")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🎰 СЛОТ-МАШИНА\n\n"
+        f"💰 Ваш баланс: {balance} монет\n\n"
+        f"Выберите ставку:",
+        reply_markup=reply_markup
+    )
+
+async def play_slots(query, context):
+    user = query.from_user
+    bet_amount = int(query.data.split('_')[2])
+    balance = get_user_balance(user.id)
+    
+    if balance < bet_amount:
+        await query.answer("❌ Недостаточно монет!", show_alert=True)
+        return
+    
+    # Символы для слотов
+    symbols = ['🍒', '🍋', '🍊', '🍇', '🔔', '💎', '7️⃣']
+    
+    # Крутим слоты
+    reels = [
+        [random.choice(symbols) for _ in range(3)],
+        [random.choice(symbols) for _ in range(3)],
+        [random.choice(symbols) for _ in range(3)]
+    ]
+    
+    # Показываем анимацию кручения
+    loading_msg = await query.edit_message_text(
+        f"🎰 КРУТИМ СЛОТЫ...\n\n"
+        f"🎰 | {' | '.join(['❓' for _ in range(3)])} |\n"
+        f"🎰 | {' | '.join(['❓' for _ in range(3)])} |\n"
+        f"🎰 | {' | '.join(['❓' for _ in range(3)])} |\n\n"
+        f"Ставка: {bet_amount} монет"
+    )
+    
+    # Задержка для анимации
+    await asyncio.sleep(1.5)
+    
+    # Определяем выигрыш
+    win_amount = 0
+    win_lines = []
+    
+    # Проверяем линии
+    for i in range(3):
+        if reels[0][i] == reels[1][i] == reels[2][i]:
+            win_lines.append(f"Линия {i+1}")
+            symbol = reels[0][i]
+            if symbol == '7️⃣':
+                win_amount += bet_amount * 10
+            elif symbol == '💎':
+                win_amount += bet_amount * 5
+            elif symbol == '🔔':
+                win_amount += bet_amount * 3
+            else:
+                win_amount += bet_amount * 2
+    
+    # Проверяем диагонали
+    if reels[0][0] == reels[1][1] == reels[2][2]:
+        win_lines.append("Диагональ ↘️")
+        win_amount += bet_amount * 3
+    
+    if reels[0][2] == reels[1][1] == reels[2][0]:
+        win_lines.append("Диагональ ↙️")
+        win_amount += bet_amount * 3
+    
+    if win_amount > 0:
+        add_user_balance(user.id, win_amount)
+        result_text = f"🎉 ВЫИГРЫШ! +{win_amount} монет!\nЛинии: {', '.join(win_lines)}"
+    else:
+        update_user_balance(user.id, balance - bet_amount)
+        result_text = f"💸 Проигрыш {bet_amount} монет"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Крутить снова", callback_data=f"slots_bet_{bet_amount}")],
+        [InlineKeyboardButton("🎰 Новая ставка", callback_data="game_slots")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="game_mellstroy")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🎰 РЕЗУЛЬТАТ СЛОТОВ\n\n"
+        f"🎰 | {' | '.join(reels[0])} |\n"
+        f"🎰 | {' | '.join(reels[1])} |\n"
+        f"🎰 | {' | '.join(reels[2])} |\n\n"
+        f"{result_text}\n"
+        f"💰 Баланс: {get_user_balance(user.id)} монет\n"
+        f"🎯 Ставка: {bet_amount} монет",
+        reply_markup=reply_markup
+    )
+
+# Игра Рулетка с выбором ставки
+async def start_roulette(query, context):
+    user = query.from_user
+    balance = get_user_balance(user.id)
+    
+    if balance < 10:
+        await query.answer("❌ Недостаточно монет! Минимальная ставка 10.", show_alert=True)
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("10 монет", callback_data="roulette_bet_10")],
+        [InlineKeyboardButton("25 монет", callback_data="roulette_bet_25")],
+        [InlineKeyboardButton("50 монет", callback_data="roulette_bet_50")],
+        [InlineKeyboardButton("100 монет", callback_data="roulette_bet_100")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="game_mellstroy")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🎡 РУЛЕТКА\n\n"
+        f"💰 Ваш баланс: {balance} монет\n\n"
+        f"Выберите ставку:",
+        reply_markup=reply_markup
+    )
+
+async def select_roulette_bet(query, context):
+    user = query.from_user
+    bet_amount = int(query.data.split('_')[2])
+    
+    keyboard = [
+        [InlineKeyboardButton("🔴 Красное (x2)", callback_data=f"roulette_red_{bet_amount}")],
+        [InlineKeyboardButton("⚫ Черное (x2)", callback_data=f"roulette_black_{bet_amount}")],
+        [InlineKeyboardButton("🟢 Зеро (x14)", callback_data=f"roulette_zero_{bet_amount}")],
+        [InlineKeyboardButton("1-12 (x3)", callback_data=f"roulette_1-12_{bet_amount}"), InlineKeyboardButton("13-24 (x3)", callback_data=f"roulette_13-24_{bet_amount}"), InlineKeyboardButton("25-36 (x3)", callback_data=f"roulette_25-36_{bet_amount}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="game_roulette")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🎡 РУЛЕТКА - Ставка: {bet_amount} монет\n\n"
+        f"Выберите тип ставки:",
+        reply_markup=reply_markup
+    )
+
+async def play_roulette(query, context):
+    user = query.from_user
+    parts = query.data.split('_')
+    bet_type = parts[1]
+    bet_amount = int(parts[2])
+    balance = get_user_balance(user.id)
+    
+    if balance < bet_amount:
+        await query.answer("❌ Недостаточно монет!", show_alert=True)
+        return
+    
+    # Крутим рулетку
+    number = random.randint(0, 36)
+    is_red = number in [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]
+    is_black = number in [2, 4, 6, 8, 10, 11, 13, 15, 17, 20, 22, 24, 26, 28, 29, 31, 33, 35]
+    
+    # Определяем выигрыш
+    win = False
+    multiplier = 1
+    
+    if bet_type == "red" and is_red:
+        win = True
+        multiplier = 2
+    elif bet_type == "black" and is_black:
+        win = True
+        multiplier = 2
+    elif bet_type == "zero" and number == 0:
+        win = True
+        multiplier = 14
+    elif bet_type == "1-12" and 1 <= number <= 12:
+        win = True
+        multiplier = 3
+    elif bet_type == "13-24" and 13 <= number <= 24:
+        win = True
+        multiplier = 3
+    elif bet_type == "25-36" and 25 <= number <= 36:
+        win = True
+        multiplier = 3
+    
+    if win:
+        win_amount = bet_amount * multiplier
+        add_user_balance(user.id, win_amount)
+        result_text = f"🎉 ВЫИГРЫШ! +{win_amount} монет (x{multiplier})"
+    else:
+        update_user_balance(user.id, balance - bet_amount)
+        result_text = f"💸 Проигрыш {bet_amount} монет"
+    
+    # Определяем цвет для отображения
+    color = "🔴" if is_red else "⚫" if is_black else "🟢"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Играть снова", callback_data="game_roulette")],
+        [InlineKeyboardButton("🔙 В меню", callback_data="game_mellstroy")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🎡 РЕЗУЛЬТАТ РУЛЕТКИ\n\n"
+        f"🎯 Выпало: {color} {number}\n"
+        f"🎲 Ваша ставка: {bet_type}\n"
+        f"💰 Сумма ставки: {bet_amount} монет\n\n"
+        f"{result_text}\n"
+        f"💰 Баланс: {get_user_balance(user.id)} монет",
+        reply_markup=reply_markup
+    )
+
+# Показать баланс
+async def show_balance(query, context):
+    user = query.from_user
+    balance = get_user_balance(user.id)
+    
+    keyboard = [
+        [InlineKeyboardButton("🎮 К играм", callback_data="game_main")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"💰 ВАШ БАЛАНС\n\n"
+        f"💎 Монеты: {balance}\n\n"
+        f"💡 Получайте монеты за активность и выигрывайте в играх!",
+        reply_markup=reply_markup
+    )
+
+# Ганг Банг игра (ссылка на внешнюю игру) - ИСПРАВЛЕННАЯ ВЕРСИЯ
+async def start_gangbang(query, context):
+    keyboard = [
+        [InlineKeyboardButton("🎮 Играть в Penalty Shooter", url="https://t.me/gamee?game=PenaltyShooter")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="game_main")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "⚽ ГАНГ БАНГ - PENALTY SHOOTER\n\n"
+        "🎯 Испытайте свои навыки в футбольном пенальти!\n"
+        "🥅 Забивайте голы и становись чемпионом!\n\n"
+        "Нажмите кнопку ниже чтобы начать игру:",
+        reply_markup=reply_markup
+    )
+
+# Команда для выдачи валюты админом
+async def give_money_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if not is_main_admin(user.id):
+        await update.message.reply_text("❌ Эта команда доступна только главному администратору!")
+        return
+    
+    if not context.args or len(context.args) != 2:
+        await update.message.reply_text(
+            "❌ Использование: /givemoney @username сумма\n"
+            "Пример: /givemoney @user123 1000"
+        )
+        return
+    
+    target_username = context.args[0]
+    try:
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Сумма должна быть числом!")
+        return
+    
+    if not target_username.startswith('@'):
+        await update.message.reply_text("❌ Введите username в формате @username")
+        return
+    
+    target_username = target_username[1:]  # Убираем @
+    target_user = find_user_by_username(target_username)
+    
+    if not target_user:
+        await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        return
+    
+    if add_user_balance(target_user[0], amount):
+        # Логируем действие
+        log_admin_action(
+            user.username,
+            user.id,
+            f"Выдал {amount} монет",
+            target_username=target_username,
+            target_user_id=target_user[0]
+        )
+        
+        await update.message.reply_text(
+            f"✅ Пользователю @{target_username} выдано {amount} монет!\n"
+            f"💰 Новый баланс: {get_user_balance(target_user[0])} монет"
+        )
+        
+        # Уведомляем пользователя
+        try:
+            await context.bot.send_message(
+                chat_id=target_user[0],
+                text=f"🎉 Вам выдано {amount} монет от администратора!\n"
+                     f"💰 Ваш баланс: {get_user_balance(target_user[0])} монет"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя: {e}")
+    else:
+        await update.message.reply_text("❌ Ошибка при выдаче монет!")
+
+# Главное меню (ОБНОВЛЕННОЕ - БЕЗ КНОПКИ ИГР)
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка на групповой чат
     if update.effective_chat.type in ['group', 'supergroup']:
@@ -1052,7 +1692,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Какая сейчас неделя?", callback_data="current_week")],
         [InlineKeyboardButton("Сменить группу", callback_data="change_group")],
         [InlineKeyboardButton("Расписание", callback_data="schedule")],
-        [InlineKeyboardButton("🕒 Расписание звонков", callback_data="bell_schedule")]
+        [InlineKeyboardButton("🕒 Расписание звонков", callback_data="bell_schedule")],
     ]
     
     # Добавляем кнопку VIP статуса
@@ -1171,11 +1811,13 @@ async def givevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_id = update.effective_chat.id
     if give_chat_vip(chat_id):
-        # Логируем действие
+        # Логируем действие с ИСПРАВЛЕННОЙ функцией
         log_admin_action(
             update.effective_user.username,
             update.effective_user.id,
-            f"Выдал VIP статус беседе {update.effective_chat.title} (ID: {chat_id})"
+            f"Выдал VIP статус беседе {update.effective_chat.title}",
+            target_username=f"chat_{chat_id}",
+            target_user_id=chat_id
         )
         await update.message.reply_text("✅ Беседе выдан VIP статус! Теперь здесь будет приходить улучшенное расписание.")
     else:
@@ -1193,11 +1835,13 @@ async def takevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_id = update.effective_chat.id
     if take_chat_vip(chat_id):
-        # Логируем действие
+        # Логируем действие с ИСПРАВЛЕННОЙ функцией
         log_admin_action(
             update.effective_user.username,
             update.effective_user.id,
-            f"Снял VIP статус с беседы {update.effective_chat.title} (ID: {chat_id})"
+            f"Снял VIP статус с беседы {update.effective_chat.title}",
+            target_username=f"chat_{chat_id}",
+            target_user_id=chat_id
         )
         await update.message.reply_text("✅ VIP статус снят с беседы.")
     else:
@@ -1233,7 +1877,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         update_user_activity(user.id)
         
-        if query.data == "select_group":
+        # Обработка игровых кнопок
+        if query.data == "game_main":
+            await game_command(update, context)
+        elif query.data == "game_gangbang":
+            await start_gangbang(query, context)
+        elif query.data == "game_mellstroy":
+            await show_mellstroy_games(query, context)
+        elif query.data == "game_blackjack":
+            await start_blackjack(query, context)
+        elif query.data == "game_slots":
+            await start_slots(query, context)
+        elif query.data == "game_roulette":
+            await start_roulette(query, context)
+        elif query.data == "game_balance":
+            await show_balance(query, context)
+        elif query.data.startswith("blackjack_bet_"):
+            await play_blackjack(query, context)
+        elif query.data == "blackjack_hit":
+            await blackjack_hit(query, context)
+        elif query.data == "blackjack_stand":
+            await blackjack_stand(query, context)
+        elif query.data.startswith("slots_bet_"):
+            await play_slots(query, context)
+        elif query.data.startswith("roulette_bet_"):
+            await select_roulette_bet(query, context)
+        elif query.data.startswith("roulette_") and any(x in query.data for x in ["red", "black", "zero", "1-12", "13-24", "25-36"]):
+            await play_roulette(query, context)
+        
+        # Обработка остальных кнопок
+        elif query.data == "select_group":
             await show_group_selection(query)
         elif query.data == "info":
             await show_bot_info(query)
@@ -1422,7 +2095,7 @@ async def show_group_selection(query):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("Выберите вашу группу:", reply_markup=reply_markup)
 
-# Показать информацию о боте
+# Показать информацию о боте (ОБНОВЛЕННАЯ - БЕЗ УПОМИНАНИЯ ИГР)
 async def show_bot_info(query):
     info_text = (
         "🤖 Бот расписания университета\n\n"
@@ -1453,6 +2126,7 @@ async def show_user_info(query, user):
         ban_status = "❌ Да" if is_banned(user.id) else "✅ Нет"
         vip_status = "✅ Да" if has_vip_status(user.id) else "❌ Нет"
         vip_mode = "✅ ВКЛ" if get_vip_mode(user.id) else "❌ ВЫКЛ"
+        balance = get_user_balance(user.id)
         
         info_text = (
             f"👤 Ваш профиль:\n\n"
@@ -1463,7 +2137,8 @@ async def show_user_info(query, user):
             f"Тип админа: {main_admin_status}\n"
             f"Заблокирован: {ban_status}\n"
             f"VIP статус: {vip_status}\n"
-            f"VIP режим: {vip_mode}"
+            f"VIP режим: {vip_mode}\n"
+            f"💰 Баланс: {balance} монет"
         )
     else:
         info_text = "Вы еще не выбрали группу."
@@ -1544,6 +2219,7 @@ async def show_admin_panel(query, user):
         keyboard.append([InlineKeyboardButton("👑 Снять гл. админа", callback_data="admin_remove_main_admin")])
         keyboard.append([InlineKeyboardButton("⭐ Выдать VIP", callback_data="admin_give_vip")])
         keyboard.append([InlineKeyboardButton("⭐ Снять VIP", callback_data="admin_take_vip")])
+        keyboard.append([InlineKeyboardButton("💰 Выдать монеты", callback_data="admin_give_money")])
         keyboard.append([InlineKeyboardButton("📋 Список администраторов", callback_data="admin_list_admins")])
         keyboard.append([InlineKeyboardButton("📝 Логи администратора", callback_data="admin_logs")])
         keyboard.append([InlineKeyboardButton("💬 Доступные беседы", callback_data="admin_chats")])
@@ -1580,6 +2256,9 @@ async def show_admin_stats(query):
     main_admin_users = len([u for u in users if (len(u) > 8 and u[8]) or u[0] == MAIN_ADMIN_ID])
     vip_users = len([u for u in users if len(u) > 7 and u[7]])
     
+    # Подсчитываем общий баланс
+    total_balance = sum([get_user_balance(user[0]) for user in users])
+    
     chats = get_all_chats()
     total_chats = len(chats)
     vip_chats = len([c for c in chats if len(c) > 5 and c[5]])
@@ -1597,7 +2276,8 @@ async def show_admin_stats(query):
         f"Заблокированных: {banned_users}\n"
         f"Администраторов: {admin_users}\n"
         f"Главных админов: {main_admin_users}\n"
-        f"VIP пользователей: {vip_users}\n\n"
+        f"VIP пользователей: {vip_users}\n"
+        f"💰 Общий баланс: {total_balance} монет\n\n"
         f"💬 Чаты:\n"
         f"Всего: {total_chats}\n"
         f"VIP чатов: {vip_chats}\n\n"
@@ -1651,7 +2331,7 @@ async def show_admin_list(query):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin_panel")]])
     )
 
-# Показать логи администраторов
+# Показать логи администраторов (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 async def show_admin_logs(query):
     if not is_main_admin(query.from_user.id):
         await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
@@ -1669,11 +2349,22 @@ async def show_admin_logs(query):
     logs_text = "📝 Логи администраторов (последние 50):\n\n"
     
     for log in logs:
-        log_id, admin_username, admin_user_id, action, timestamp = log
+        log_id, admin_username, admin_user_id, action, target_username, target_user_id, timestamp = log
         timestamp_str = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
         admin_display = f"@{admin_username}" if admin_username else f"ID: {admin_user_id}"
         
-        logs_text += f"🕒 {timestamp_str}\n👤 {admin_display}\n📝 {action}\n\n"
+        # Добавляем информацию о цели действия
+        target_info = ""
+        if target_username:
+            target_info = f" -> @{target_username}"
+        elif target_user_id:
+            target_info = f" -> ID: {target_user_id}"
+        
+        logs_text += f"🕒 {timestamp_str}\n👤 {admin_display}\n📝 {action}{target_info}\n\n"
+    
+    # Если логов слишком много, разбиваем на части
+    if len(logs_text) > 4000:
+        logs_text = logs_text[:4000] + "\n\n... (логи обрезаны, показаны только последние записи)"
     
     await query.edit_message_text(
         logs_text,
@@ -1804,7 +2495,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             BROADCAST_TIME = new_time
             context.user_data['awaiting_broadcast_time'] = False
             
-            # Логируем действие
+            # Логируем действие с ИСПРАВЛЕННОЙ функцией
             log_admin_action(
                 user.username,
                 user.id,
@@ -1831,11 +2522,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_ban:
                 if ban_user(user_to_ban[0]):
                     context.user_data['awaiting_ban'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Заблокировал пользователя @{username}"
+                        "Заблокировал пользователя",
+                        target_username=username,
+                        target_user_id=user_to_ban[0]
                     )
                     await update.message.reply_text(
                         f"✅ Пользователь @{username} заблокирован!",
@@ -1856,11 +2549,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_unban:
                 if unban_user(user_to_unban[0]):
                     context.user_data['awaiting_unban'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Разблокировал пользователя @{username}"
+                        "Разблокировал пользователя",
+                        target_username=username,
+                        target_user_id=user_to_unban[0]
                     )
                     await update.message.reply_text(
                         f"✅ Пользователь @{username} разблокирован!",
@@ -1881,11 +2576,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_admin:
                 if make_admin(user_to_admin[0]):
                     context.user_data['awaiting_make_admin'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Выдал права администратора пользователю @{username}"
+                        "Выдал права администратора",
+                        target_username=username,
+                        target_user_id=user_to_admin[0]
                     )
                     await update.message.reply_text(
                         f"✅ Пользователю @{username} выданы права администратора!",
@@ -1906,11 +2603,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_remove_admin:
                 if remove_admin(user_to_remove_admin[0]):
                     context.user_data['awaiting_remove_admin'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Снял права администратора у пользователя @{username}"
+                        "Снял права администратора",
+                        target_username=username,
+                        target_user_id=user_to_remove_admin[0]
                     )
                     await update.message.reply_text(
                         f"✅ У пользователя @{username} сняты права администратора!",
@@ -1931,11 +2630,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_main_admin:
                 if make_main_admin(user_to_main_admin[0]):
                     context.user_data['awaiting_make_main_admin'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Выдал права главного администратора пользователю @{username}"
+                        "Выдал права главного администратора",
+                        target_username=username,
+                        target_user_id=user_to_main_admin[0]
                     )
                     await update.message.reply_text(
                         f"✅ Пользователю @{username} выданы права главного администратора!",
@@ -1956,11 +2657,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_remove_main_admin:
                 if remove_main_admin(user_to_remove_main_admin[0]):
                     context.user_data['awaiting_remove_main_admin'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Снял права главного администратора у пользователя @{username}"
+                        "Снял права главного администратора",
+                        target_username=username,
+                        target_user_id=user_to_remove_main_admin[0]
                     )
                     await update.message.reply_text(
                         f"✅ У пользователя @{username} сняты права главного администратора!",
@@ -1981,11 +2684,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_vip:
                 if give_vip(user_to_vip[0]):
                     context.user_data['awaiting_give_vip'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Выдал VIP статус пользователю @{username}"
+                        "Выдал VIP статус",
+                        target_username=username,
+                        target_user_id=user_to_vip[0]
                     )
                     await update.message.reply_text(
                         f"✅ Пользователю @{username} выдан VIP статус!",
@@ -2006,11 +2711,13 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_unvip:
                 if take_vip(user_to_unvip[0]):
                     context.user_data['awaiting_take_vip'] = False
-                    # Логируем действие
+                    # Логируем действие с ИСПРАВЛЕННОЙ функцией
                     log_admin_action(
                         user.username,
                         user.id,
-                        f"Снял VIP статус у пользователя @{username}"
+                        "Снял VIP статус",
+                        target_username=username,
+                        target_user_id=user_to_unvip[0]
                     )
                     await update.message.reply_text(
                         f"✅ У пользователя @{username} снят VIP статус!",
@@ -2020,6 +2727,42 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                     await update.message.reply_text("❌ Ошибка при снятии VIP статуса!")
             else:
                 await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка выдачи монет
+    elif context.user_data.get('awaiting_give_money'):
+        if update.message.text.startswith('@'):
+            parts = update.message.text.split()
+            if len(parts) >= 2:
+                username = parts[0][1:]  # Убираем @
+                try:
+                    amount = int(parts[1])
+                    user_to_give = find_user_by_username(username)
+                    if user_to_give:
+                        if add_user_balance(user_to_give[0], amount):
+                            context.user_data['awaiting_give_money'] = False
+                            # Логируем действие
+                            log_admin_action(
+                                user.username,
+                                user.id,
+                                f"Выдал {amount} монет",
+                                target_username=username,
+                                target_user_id=user_to_give[0]
+                            )
+                            await update.message.reply_text(
+                                f"✅ Пользователю @{username} выдано {amount} монет!\n"
+                                f"💰 Новый баланс: {get_user_balance(user_to_give[0])} монет",
+                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                            )
+                        else:
+                            await update.message.reply_text("❌ Ошибка при выдаче монет!")
+                    else:
+                        await update.message.reply_text("❌ Пользователь с таким username не найден!")
+                except ValueError:
+                    await update.message.reply_text("❌ Сумма должна быть числом!")
+            else:
+                await update.message.reply_text("❌ Использование: @username сумма")
         else:
             await update.message.reply_text("❌ Введите username в формате @username")
 
@@ -2136,11 +2879,13 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
     )
     
-    # Логируем действие
+    # Логируем действие с ИСПРАВЛЕННОЙ функцией
     log_admin_action(
         query.from_user.username,
         query.from_user.id,
-        f"Сделал рассылку для {groups_text}. Успешно: {sent_count}, Не удалось: {failed_count}"
+        f"Сделал рассылку для {groups_text}",
+        target_username=f"broadcast_{content_data['type']}",
+        target_user_id=None
     )
     
     # Очищаем данные рассылки
@@ -2187,7 +2932,7 @@ async def send_schedule_broadcast_now(update: Update, context: ContextTypes.DEFA
     # Используем существующую функцию рассылки
     await send_daily_schedule(context)
     
-    # Логируем действие
+    # Логируем действие с ИСПРАВЛЕННОЙ функцией
     log_admin_action(
         query.from_user.username,
         query.from_user.id,
@@ -2292,6 +3037,18 @@ async def start_take_vip(query, context):
     context.user_data['awaiting_take_vip'] = True
     await query.edit_message_text(
         "Введите @username пользователя для снятия VIP статуса (например, @username):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+    )
+
+# Начать выдачу монет
+async def start_give_money(query, context):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    context.user_data['awaiting_give_money'] = True
+    await query.edit_message_text(
+        "Введите @username и сумму для выдачи монет (например, @username 1000):",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
     )
 
@@ -2422,7 +3179,9 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
         not update.message.text.startswith('/givevip') and
         not update.message.text.startswith('/takevip') and
         not update.message.text.startswith('/zakladka') and
-        not update.message.text.startswith('/gangbang')):
+        not update.message.text.startswith('/gangbang') and
+        not update.message.text.startswith('/game') and
+        not update.message.text.startswith('/givemoney')):
         return
     
     user = update.effective_user
@@ -2440,6 +3199,11 @@ def main():
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Добавляем новые команды
+    application.add_handler(CommandHandler("game", game_command))
+    application.add_handler(CommandHandler("givemoney", give_money_command))
+    
+    # Существующие команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("group", group_command))
     application.add_handler(CommandHandler("givevip", givevip_command))
