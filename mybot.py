@@ -5,6 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import asyncio
 import os
+import re
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,6 +23,12 @@ ADMIN_IDS = [MAIN_ADMIN_ID]
 
 # Список доступных групп (убрана ТСН-25)
 GROUPS = ["ПСН-24", "ПСН-23", "ПСН-25", "ТСН-24", "ТСН-23", "СТН-25"]
+
+# Глобальная переменная для хранения состояния VIP режима пользователей
+USER_VIP_MODE = {}
+
+# Время рассылки по умолчанию
+BROADCAST_TIME = "19:00"
 
 # Дата начала учебного года
 def get_academic_year_start():
@@ -272,10 +279,33 @@ for group in GROUPS:
     if group not in SCHEDULE:
         SCHEDULE[group] = SCHEDULE["ПСН-24"]
 
+# Функции для работы с VIP режимом
+def set_vip_mode(user_id, enabled):
+    """Установить режим VIP для пользователя"""
+    USER_VIP_MODE[user_id] = enabled
+    return True
+
+def get_vip_mode(user_id):
+    """Получить состояние VIP режима для пользователя"""
+    return USER_VIP_MODE.get(user_id, False)
+
+def has_vip_status(user_id):
+    """Проверяет, есть ли у пользователя VIP статус (независимо от режима)"""
+    try:
+        user = get_user(user_id)
+        if user and len(user) >= 8:
+            return bool(user[7])  # user[7] - is_vip
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке VIP статуса для {user_id}: {e}")
+        return False
+
 # Инициализация базы данных
 def init_db():
     conn = sqlite3.connect('university_bot.db', check_same_thread=False)
     cursor = conn.cursor()
+    
+    # Создаем таблицу users с правильными колонками
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -284,18 +314,24 @@ def init_db():
             group_name TEXT,
             last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_banned BOOLEAN DEFAULT FALSE,
-            is_admin BOOLEAN DEFAULT FALSE
+            is_admin BOOLEAN DEFAULT FALSE,
+            is_vip BOOLEAN DEFAULT FALSE,
+            is_main_admin BOOLEAN DEFAULT FALSE
         )
     ''')
+    
+    # Создаем таблицу chats с правильными колонками
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
             chat_title TEXT,
             added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_active BOOLEAN DEFAULT TRUE,
-            chat_group TEXT
+            chat_group TEXT,
+            is_vip BOOLEAN DEFAULT FALSE
         )
     ''')
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_users (
             chat_id INTEGER,
@@ -304,19 +340,122 @@ def init_db():
             PRIMARY KEY (chat_id, user_id)
         )
     ''')
+    
+    # Исправленная таблица admin_logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_username TEXT,
+            admin_user_id INTEGER,
+            action TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Проверяем и добавляем отсутствующие колонки в таблицу users
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    if 'is_vip' not in columns:
+        cursor.execute('ALTER TABLE users ADD COLUMN is_vip BOOLEAN DEFAULT FALSE')
+        logger.info("Добавлена колонка is_vip в таблицу users")
+    
+    if 'is_main_admin' not in columns:
+        cursor.execute('ALTER TABLE users ADD COLUMN is_main_admin BOOLEAN DEFAULT FALSE')
+        logger.info("Добавлена колонка is_main_admin в таблицу users")
+    
+    # Проверяем и добавляем отсутствующие колонки в таблицу chats
+    cursor.execute("PRAGMA table_info(chats)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    if 'chat_group' not in columns:
+        cursor.execute('ALTER TABLE chats ADD COLUMN chat_group TEXT')
+        logger.info("Добавлена колонка chat_group в таблицу chats")
+    
+    if 'is_vip' not in columns:
+        cursor.execute('ALTER TABLE chats ADD COLUMN is_vip BOOLEAN DEFAULT FALSE')
+        logger.info("Добавлена колонка is_vip в таблицу chats")
+    
+    # Проверяем и добавляем отсутствующие колонки в таблицу admin_logs
+    cursor.execute("PRAGMA table_info(admin_logs)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    if 'admin_username' not in columns:
+        cursor.execute('ALTER TABLE admin_logs ADD COLUMN admin_username TEXT')
+        logger.info("Добавлена колонка admin_username в таблицу admin_logs")
+    
+    if 'admin_user_id' not in columns:
+        cursor.execute('ALTER TABLE admin_logs ADD COLUMN admin_user_id INTEGER')
+        logger.info("Добавлена колонка admin_user_id в таблицу admin_logs")
+    
+    if 'action' not in columns:
+        cursor.execute('ALTER TABLE admin_logs ADD COLUMN action TEXT')
+        logger.info("Добавлена колонка action в таблицу admin_logs")
+    
+    # Добавляем главного администратора в базу если его нет
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (MAIN_ADMIN_ID,))
+    if not cursor.fetchone():
+        cursor.execute('''
+            INSERT INTO users (user_id, username, first_name, group_name, is_admin, is_vip, is_main_admin)
+            VALUES (?, ?, ?, ?, TRUE, TRUE, TRUE)
+        ''', (MAIN_ADMIN_ID, "bokalpivka", "Admin", "ПСН-24"))
+        logger.info("Главный администратор добавлен в базу")
+    
     conn.commit()
     conn.close()
+    logger.info("База данных инициализирована успешно")
+
+# Получение всех чатов с информацией о количестве участников (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+def get_all_chats_with_info():
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT c.chat_id, c.chat_title, c.chat_group, c.is_vip, 
+                   COUNT(cu.user_id) as user_count
+            FROM chats c
+            LEFT JOIN chat_users cu ON c.chat_id = cu.chat_id
+            WHERE c.is_active = TRUE
+            GROUP BY c.chat_id, c.chat_title, c.chat_group, c.is_vip
+            ORDER BY c.chat_title
+        ''')
+        chats = cursor.fetchall()
+        conn.close()
+        return chats
+    except Exception as e:
+        logger.error(f"Ошибка при получении информации о чатах: {e}")
+        return []
+
+# Логирование действий администратора
+def log_admin_action(admin_username, admin_user_id, action):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO admin_logs (admin_username, admin_user_id, action)
+            VALUES (?, ?, ?)
+        ''', (admin_username, admin_user_id, action))
+        conn.commit()
+        conn.close()
+        logger.info(f"Admin action logged: {admin_username} ({admin_user_id}) - {action}")
+    except Exception as e:
+        logger.error(f"Ошибка при логировании действия администратора: {e}")
 
 # Сохранение пользователя
 def save_user(user_id, username, first_name, group_name):
-    conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO users (user_id, username, first_name, group_name, last_active)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ''', (user_id, username, first_name, group_name))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO users (user_id, username, first_name, group_name, last_active)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (user_id, username, first_name, group_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении пользователя {user_id}: {e}")
+        return False
 
 # Получение пользователя
 def get_user(user_id):
@@ -357,6 +496,19 @@ def get_users_by_group(group_name):
         logger.error(f"Ошибка при получении пользователей группы {group_name}: {e}")
         return []
 
+# Получение VIP пользователей по группе
+def get_vip_users_by_group(group_name):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE group_name = ? AND is_banned = FALSE AND is_vip = TRUE', (group_name,))
+        users = cursor.fetchall()
+        conn.close()
+        return users
+    except Exception as e:
+        logger.error(f"Ошибка при получении VIP пользователей группы {group_name}: {e}")
+        return []
+
 # Получение всех пользователей
 def get_all_users():
     try:
@@ -388,12 +540,25 @@ def get_all_admins():
     try:
         conn = sqlite3.connect('university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE is_admin = TRUE OR user_id IN ({})'.format(','.join('?' for _ in ADMIN_IDS)), ADMIN_IDS)
+        cursor.execute('SELECT * FROM users WHERE is_admin = TRUE OR is_main_admin = TRUE OR user_id IN ({})'.format(','.join('?' for _ in ADMIN_IDS)), ADMIN_IDS)
         admins = cursor.fetchall()
         conn.close()
         return admins
     except Exception as e:
         logger.error(f"Ошибка при получении администраторов: {e}")
+        return []
+
+# Получение всех главных администраторов
+def get_main_admins():
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE is_main_admin = TRUE OR user_id = ?', (MAIN_ADMIN_ID,))
+        admins = cursor.fetchall()
+        conn.close()
+        return admins
+    except Exception as e:
+        logger.error(f"Ошибка при получении главных администраторов: {e}")
         return []
 
 # Получение всех чатов
@@ -407,6 +572,24 @@ def get_all_chats():
         return chats
     except Exception as e:
         logger.error(f"Ошибка при получении чатов: {e}")
+        return []
+
+# Получение VIP чатов по группе
+def get_vip_chats_by_group(group_name):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT c.chat_id, c.chat_title 
+            FROM chats c
+            JOIN chat_users cu ON c.chat_id = cu.chat_id
+            WHERE cu.group_name = ? AND c.is_active = TRUE AND c.is_vip = TRUE
+        ''', (group_name,))
+        chats = cursor.fetchall()
+        conn.close()
+        return chats
+    except Exception as e:
+        logger.error(f"Ошибка при получении VIP чатов группы {group_name}: {e}")
         return []
 
 # Получение чатов по группе
@@ -438,6 +621,7 @@ def add_chat(chat_id, chat_title):
         ''', (chat_id, chat_title))
         conn.commit()
         conn.close()
+        logger.info(f"Чат добавлен: {chat_title} (ID: {chat_id})")
         return True
     except Exception as e:
         logger.error(f"Ошибка при добавлении чата {chat_id}: {e}")
@@ -451,6 +635,7 @@ def set_chat_group(chat_id, group_name):
         cursor.execute('UPDATE chats SET chat_group = ? WHERE chat_id = ?', (group_name, chat_id))
         conn.commit()
         conn.close()
+        logger.info(f"Для чата {chat_id} установлена группа: {group_name}")
         return True
     except Exception as e:
         logger.error(f"Ошибка при установке группы для чата {chat_id}: {e}")
@@ -480,6 +665,7 @@ def save_chat_user(chat_id, user_id, group_name):
         ''', (chat_id, user_id, group_name))
         conn.commit()
         conn.close()
+        logger.info(f"Пользователь {user_id} добавлен в чат {chat_id} с группой {group_name}")
         return True
     except Exception as e:
         logger.error(f"Ошибка при сохранении пользователя чата {chat_id}: {e}")
@@ -496,6 +682,26 @@ def get_chat_user_group(chat_id, user_id):
         return result[0] if result else None
     except Exception as e:
         logger.error(f"Ошибка при получении группы пользователя чата {chat_id}: {e}")
+        return None
+
+# Получение основной группы чата (по большинству пользователей)
+def get_main_chat_group(chat_id):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT group_name, COUNT(*) as count 
+            FROM chat_users 
+            WHERE chat_id = ? 
+            GROUP BY group_name 
+            ORDER BY count DESC 
+            LIMIT 1
+        ''', (chat_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Ошибка при получении основной группы чата {chat_id}: {e}")
         return None
 
 # Обновление активности
@@ -517,6 +723,7 @@ def ban_user(user_id):
         cursor.execute('UPDATE users SET is_banned = TRUE WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        logger.info(f"Пользователь {user_id} забанен")
         return True
     except Exception as e:
         logger.error(f"Ошибка при бане пользователя {user_id}: {e}")
@@ -530,6 +737,7 @@ def unban_user(user_id):
         cursor.execute('UPDATE users SET is_banned = FALSE WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        logger.info(f"Пользователь {user_id} разбанен")
         return True
     except Exception as e:
         logger.error(f"Ошибка при разбане пользователя {user_id}: {e}")
@@ -543,6 +751,7 @@ def make_admin(user_id):
         cursor.execute('UPDATE users SET is_admin = TRUE WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        logger.info(f"Пользователь {user_id} стал администратором")
         return True
     except Exception as e:
         logger.error(f"Ошибка при выдаче прав админа пользователю {user_id}: {e}")
@@ -552,7 +761,7 @@ def make_admin(user_id):
 def remove_admin(user_id):
     try:
         # Нельзя убрать права у главного администратора
-        if user_id == MAIN_ADMIN_ID:
+        if user_id == MAIN_ADMIN_ID or is_main_admin(user_id):
             return False
             
         conn = sqlite3.connect('university_bot.db', check_same_thread=False)
@@ -560,34 +769,168 @@ def remove_admin(user_id):
         cursor.execute('UPDATE users SET is_admin = FALSE WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        logger.info(f"Пользователь {user_id} лишен прав администратора")
         return True
     except Exception as e:
         logger.error(f"Ошибка при снятии прав админа у пользователя {user_id}: {e}")
         return False
 
-# Проверка админа (безопасная версия)
-def is_admin(user_id):
+# Сделать главным администратором
+def make_main_admin(user_id):
     try:
-        if user_id in ADMIN_IDS:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_main_admin = TRUE, is_admin = TRUE WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Пользователь {user_id} стал главным администратором")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче прав главного админа пользователю {user_id}: {e}")
+        return False
+
+# Убрать права главного администратора
+def remove_main_admin(user_id):
+    try:
+        # Нельзя убрать права у основного главного администратора
+        if user_id == MAIN_ADMIN_ID:
+            return False
+            
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_main_admin = FALSE WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Пользователь {user_id} лишен прав главного администратора")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при снятии прав главного админа у пользователя {user_id}: {e}")
+        return False
+
+# Выдать VIP статус пользователю
+def give_vip(user_id):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_vip = TRUE WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Пользователь {user_id} получил VIP статус")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче VIP статуса пользователю {user_id}: {e}")
+        return False
+
+# Забрать VIP статус у пользователя
+def take_vip(user_id):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_vip = FALSE WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Пользователь {user_id} лишен VIP статуса")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при снятии VIP статуса у пользователя {user_id}: {e}")
+        return False
+
+# Выдать VIP статус чату
+def give_chat_vip(chat_id):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE chats SET is_vip = TRUE WHERE chat_id = ?', (chat_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Чат {chat_id} получил VIP статус")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче VIP статуса чату {chat_id}: {e}")
+        return False
+
+# Забрать VIP статус у чата
+def take_chat_vip(chat_id):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE chats SET is_vip = FALSE WHERE chat_id = ?', (chat_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Чат {chat_id} лишен VIP статуса")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при снятии VIP статуса у чата {chat_id}: {e}")
+        return False
+
+# Проверка VIP статуса пользователя (с учетом режима)
+def is_vip(user_id):
+    """Проверяет, есть ли у пользователя VIP статус И включен ли VIP режим"""
+    try:
+        return has_vip_status(user_id) and get_vip_mode(user_id)
+    except Exception as e:
+        logger.error(f"Ошибка при проверке VIP статуса для {user_id}: {e}")
+        return False
+
+# Проверка главного админа
+def is_main_admin(user_id):
+    try:
+        if user_id == MAIN_ADMIN_ID:
             return True
         
         user = get_user(user_id)
-        if user and len(user) > 6:
+        if user and len(user) >= 9:  # Проверяем что есть достаточно колонок
+            return bool(user[8])  # user[8] - is_main_admin
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке прав главного админа для {user_id}: {e}")
+        return False
+
+# Проверка VIP статуса чата
+def is_chat_vip(chat_id):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT is_vip FROM chats WHERE chat_id = ?', (chat_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке VIP статуса чата {chat_id}: {e}")
+        return False
+
+# Получение логов администраторов
+def get_admin_logs(limit=50):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM admin_logs ORDER BY timestamp DESC LIMIT ?', (limit,))
+        logs = cursor.fetchall()
+        conn.close()
+        return logs
+    except Exception as e:
+        logger.error(f"Ошибка при получении логов администраторов: {e}")
+        return []
+
+# Проверка админа (безопасная версия)
+def is_admin(user_id):
+    try:
+        if user_id in ADMIN_IDS or is_main_admin(user_id):
+            return True
+        
+        user = get_user(user_id)
+        if user and len(user) >= 7:  # Проверяем что есть достаточно колонок
             return bool(user[6])  # user[6] - is_admin
         return False
     except Exception as e:
         logger.error(f"Ошибка при проверке прав админа для {user_id}: {e}")
         return False
 
-# Проверка главного админа
-def is_main_admin(user_id):
-    return user_id == MAIN_ADMIN_ID
-
 # Проверка бана (безопасная версия)
 def is_banned(user_id):
     try:
         user = get_user(user_id)
-        if user and len(user) > 5:
+        if user and len(user) >= 6:  # Проверяем что есть достаточно колонок
             return bool(user[5])  # user[5] - is_banned
         return False
     except Exception as e:
@@ -609,6 +952,79 @@ def get_russian_weekday(date=None):
         6: "Воскресенье"
     }
     return weekdays[date.weekday()]
+
+# Функция для парсинга расписания и фильтрации пар по текущей неделе (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+def parse_vip_schedule(schedule_text, current_week):
+    if not schedule_text or not schedule_text.strip():
+        return "На этот день пар нет! 🎉"
+    
+    lines = schedule_text.split('\n')
+    filtered_lines = []
+    
+    for line in lines:
+        if not line.strip():
+            filtered_lines.append(line)
+            continue
+            
+        # Сохраняем номер пары
+        line_with_number = line
+        
+        # Если строка содержит информацию о неделях
+        if 'н.' in line:
+            # Разделяем на части до и после " - "
+            if ' - ' in line:
+                subject_part = line.split(' - ')[0]
+                weeks_part = line.split(' - ')[1]
+                
+                # Проверяем все диапазоны недель в этой строке
+                week_ranges = weeks_part.split(', ')
+                current_week_present = False
+                
+                for week_range in week_ranges:
+                    if 'н' in week_range:
+                        week_str = week_range.split(' н')[0].strip()
+                        if '-' in week_str:
+                            # Диапазон недель (например, "1-13")
+                            try:
+                                start_week, end_week = map(int, week_str.split('-'))
+                                if start_week <= current_week <= end_week:
+                                    current_week_present = True
+                                    break
+                            except ValueError:
+                                # Если не удалось распарсить диапазон, оставляем строку
+                                current_week_present = True
+                                break
+                        else:
+                            # Одиночные недели (например, "1,3,5")
+                            try:
+                                weeks = [int(w.strip()) for w in week_str.split(',')]
+                                if current_week in weeks:
+                                    current_week_present = True
+                                    break
+                            except ValueError:
+                                # Если не удалось распарсить недели, оставляем строку
+                                current_week_present = True
+                                break
+                
+                if current_week_present:
+                    filtered_lines.append(line_with_number)
+            else:
+                # Если нет разделителя " - ", но есть "н.", оставляем строку
+                filtered_lines.append(line_with_number)
+        else:
+            # Если строка не содержит информации о неделях, оставляем её
+            filtered_lines.append(line_with_number)
+    
+    result = '\n'.join(filtered_lines)
+    return result if result.strip() else "На этот день пар нет! 🎉"
+
+# Получение VIP расписания
+def get_vip_schedule(group_name, weekday, week_type, current_week):
+    if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and weekday in SCHEDULE[group_name][week_type]:
+        schedule_text = SCHEDULE[group_name][week_type][weekday]
+        vip_schedule = parse_vip_schedule(schedule_text, current_week)
+        return vip_schedule
+    return "На этот день пар нет! 🎉"
 
 # Главное меню
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -638,6 +1054,15 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Расписание", callback_data="schedule")],
         [InlineKeyboardButton("🕒 Расписание звонков", callback_data="bell_schedule")]
     ]
+    
+    # Добавляем кнопку VIP статуса
+    if has_vip_status(user.id):
+        if get_vip_mode(user.id):
+            keyboard.append([InlineKeyboardButton("⭐ VIP: ВКЛ", callback_data="toggle_vip_off")])
+        else:
+            keyboard.append([InlineKeyboardButton("⭐ VIP: ВЫКЛ", callback_data="toggle_vip_on")])
+    else:
+        keyboard.append([InlineKeyboardButton("⭐ VIP: НЕТ ДОСТУПА", callback_data="vip_info")])
     
     # Безопасная проверка админа
     try:
@@ -734,6 +1159,62 @@ async def group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
+# Команда /givevip для выдачи VIP статуса беседе
+async def givevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ Эта команда работает только в групповых чатах.")
+        return
+    
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ У вас нет прав для использования этой команды.")
+        return
+    
+    chat_id = update.effective_chat.id
+    if give_chat_vip(chat_id):
+        # Логируем действие
+        log_admin_action(
+            update.effective_user.username,
+            update.effective_user.id,
+            f"Выдал VIP статус беседе {update.effective_chat.title} (ID: {chat_id})"
+        )
+        await update.message.reply_text("✅ Беседе выдан VIP статус! Теперь здесь будет приходить улучшенное расписание.")
+    else:
+        await update.message.reply_text("❌ Ошибка при выдаче VIP статуса.")
+
+# Команда /takevip для снятия VIP статуса с беседы
+async def takevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ Эта команда работает только в групповых чатах.")
+        return
+    
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ У вас нет прав для использования этой команды.")
+        return
+    
+    chat_id = update.effective_chat.id
+    if take_chat_vip(chat_id):
+        # Логируем действие
+        log_admin_action(
+            update.effective_user.username,
+            update.effective_user.id,
+            f"Снял VIP статус с беседы {update.effective_chat.title} (ID: {chat_id})"
+        )
+        await update.message.reply_text("✅ VIP статус снят с беседы.")
+    else:
+        await update.message.reply_text("❌ Ошибка при снятии VIP статуса.")
+
+# Команда /zakladka
+async def zakladka_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📍 Координаты: 57.857975, 39.518506")
+
+# Команда /gangbang
+async def gangbang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Ганг Банг это известная футбольная команда, которая была создана 27 октября 2025 года. "
+        "Их девиз был: скорость, напор, семь голов – один удар! Мы не идем в обход, мы идем напролом. "
+        "Дриблинг, пас, гол – вот наш ритм. Готовы к буму? Но команда распалась 30 октября 2025 года."
+    )
+
 # Обработчик кнопок
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -786,12 +1267,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_make_admin(query, context)
         elif query.data == "admin_remove_admin":
             await start_remove_admin(query, context)
+        elif query.data == "admin_make_main_admin":
+            await start_make_main_admin(query, context)
+        elif query.data == "admin_remove_main_admin":
+            await start_remove_main_admin(query, context)
         elif query.data == "admin_list_admins":
             await show_admin_list(query)
+        elif query.data == "admin_give_vip":
+            await start_give_vip(query, context)
+        elif query.data == "admin_take_vip":
+            await start_take_vip(query, context)
+        elif query.data == "admin_logs":
+            await show_admin_logs(query)
+        elif query.data == "admin_chats":
+            await show_admin_chats(query)
+        elif query.data == "admin_change_time":
+            await start_change_broadcast_time(query, context)
         elif query.data == "admin_back":
             await main_menu(update, context)
         elif query.data == "confirm_broadcast":
             await confirm_broadcast(update, context)
+        elif query.data == "toggle_vip_on":
+            await toggle_vip_on(query, context)
+        elif query.data == "toggle_vip_off":
+            await toggle_vip_off(query, context)
+        elif query.data == "vip_info":
+            await show_vip_info(query)
         elif query.data.startswith("broadcast_group_"):
             group_name = query.data.replace("broadcast_group_", "")
             context.user_data['selected_groups'] = [group_name]
@@ -820,6 +1321,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в обработчике кнопок: {e}")
         await query.edit_message_text("⚠️ Произошла ошибка. Попробуйте еще раз.")
+
+# Включение VIP режима
+async def toggle_vip_on(query, context):
+    user = query.from_user
+    if has_vip_status(user.id):
+        set_vip_mode(user.id, True)
+        await query.edit_message_text(
+            "⭐ VIP режим активирован! Теперь вы будете получать улучшенное расписание.\n\n"
+            "VIP расписание показывает только те пары, которые идут на текущей неделе.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В главное меню", callback_data="main_menu")]])
+        )
+    else:
+        await query.edit_message_text(
+            "❌ У вас нет VIP статуса.\n\n"
+            "Для покупки VIP статуса обратитесь к администратору - @bokalpivka",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В главное меню", callback_data="main_menu")]])
+        )
+
+# Выключение VIP режима
+async def toggle_vip_off(query, context):
+    user = query.from_user
+    set_vip_mode(user.id, False)
+    await query.edit_message_text(
+        "⭐ VIP режим деактивирован. Вы снова будете получать обычное расписание.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В главное меню", callback_data="main_menu")]])
+    )
+
+# Информация о VIP статусе
+async def show_vip_info(query):
+    await query.edit_message_text(
+        "⭐ VIP СТАТУС\n\n"
+        "VIP статус дает вам доступ к улучшенному расписанию:\n"
+        "• Показывает только актуальные пары на текущей неделе\n"
+        "• Фильтрует расписание по номерам недель\n"
+        "• Убирает лишнюю информацию\n\n"
+        "Для покупки VIP статуса обратитесь к администратору - @bokalpivka",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В главное меню", callback_data="main_menu")]])
+    )
+
+# Показать доступные беседы (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+async def show_admin_chats(query):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    chats = get_all_chats_with_info()
+    
+    if not chats:
+        await query.edit_message_text(
+            "📊 Нет активных бесед.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin_panel")]])
+        )
+        return
+    
+    chats_text = "📊 Доступные беседы:\n\n"
+    
+    for i, chat in enumerate(chats, 1):
+        chat_id, chat_title, chat_group, is_vip, user_count = chat
+        
+        # Получаем основную группу беседы
+        main_group = get_main_chat_group(chat_id)
+        group_info = main_group if main_group else "Не определена"
+        
+        vip_status = "⭐ VIP" if is_vip else "Обычная"
+        
+        chats_text += f"{i}. {chat_title}\n"
+        chats_text += f"   👥 Участников: {user_count}\n"
+        chats_text += f"   📚 Основная группа: {group_info}\n"
+        chats_text += f"   🏷️ Статус: {vip_status}\n\n"
+    
+    await query.edit_message_text(
+        chats_text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin_panel")]])
+    )
 
 # Показать расписание звонков
 async def show_bell_schedule(query):
@@ -857,7 +1432,8 @@ async def show_bot_info(query):
         "• Ежедневная рассылка расписания\n"
         "• Выбор и смена группы\n"
         "• Информация о пользователе\n"
-        "• Определение четности недели\n\n"
+        "• Определение четности недели\n"
+        "• VIP расписание (только актуальные пары)\n\n"
         "Бот разработан для удобного доступа к расписанию занятий.\n\n"
         "👨‍💻 Владелец/разработчик - @bokalpivka"
     )
@@ -869,10 +1445,14 @@ async def show_bot_info(query):
 # Показать информацию о пользователе
 async def show_user_info(query, user):
     user_data = get_user(user.id)
-    if user_data and len(user_data) > 3:
-        group_name = user_data[3]
+    if user_data:
+        # Безопасное извлечение данных
+        group_name = user_data[3] if len(user_data) > 3 else "Не выбрана"
         admin_status = "✅ Да" if is_admin(user.id) else "❌ Нет"
+        main_admin_status = "👑 Главный" if is_main_admin(user.id) else "✅ Обычный" if is_admin(user.id) else "❌ Нет"
         ban_status = "❌ Да" if is_banned(user.id) else "✅ Нет"
+        vip_status = "✅ Да" if has_vip_status(user.id) else "❌ Нет"
+        vip_mode = "✅ ВКЛ" if get_vip_mode(user.id) else "❌ ВЫКЛ"
         
         info_text = (
             f"👤 Ваш профиль:\n\n"
@@ -880,7 +1460,10 @@ async def show_user_info(query, user):
             f"Имя: {user.first_name}\n"
             f"Ваша группа: {group_name}\n"
             f"Администратор: {admin_status}\n"
-            f"Заблокирован: {ban_status}"
+            f"Тип админа: {main_admin_status}\n"
+            f"Заблокирован: {ban_status}\n"
+            f"VIP статус: {vip_status}\n"
+            f"VIP режим: {vip_mode}"
         )
     else:
         info_text = "Вы еще не выбрали группу."
@@ -921,18 +1504,25 @@ async def show_today_schedule(query, user):
     today = get_russian_weekday()
     week_number, week_type = get_current_week()
     
-    if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and today in SCHEDULE[group_name][week_type]:
-        schedule_text = SCHEDULE[group_name][week_type][today]
-        message = f"📅 Расписание на сегодня ({today}) для группы {group_name}:\n\n{schedule_text}\n\n({week_type} неделя, неделя №{week_number})"
+    # Проверяем VIP статус
+    if is_vip(user.id):
+        # Показываем VIP расписание
+        vip_schedule = get_vip_schedule(group_name, today, week_type, week_number)
+        message = f"⭐ VIP РАСПИСАНИЕ на сегодня ({today}) для группы {group_name}:\n\n{vip_schedule}\n\n({week_type} неделя, неделя №{week_number})"
     else:
-        message = f"На сегодня ({today}) расписание для группы {group_name} не найдено."
+        # Обычное расписание
+        if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and today in SCHEDULE[group_name][week_type]:
+            schedule_text = SCHEDULE[group_name][week_type][today]
+            message = f"📅 Расписание на сегодня ({today}) для группы {group_name}:\n\n{schedule_text}\n\n({week_type} неделя, неделя №{week_number})"
+        else:
+            message = f"На сегодня ({today}) расписание для группы {group_name} не найдено."
     
     await query.edit_message_text(
         message,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
     )
 
-# Админ-панель
+# Админ-панель (ОБНОВЛЕННАЯ ВЕРСИЯ)
 async def show_admin_panel(query, user):
     if not is_admin(user.id):
         await query.edit_message_text("Доступ запрещен!")
@@ -946,16 +1536,36 @@ async def show_admin_panel(query, user):
         [InlineKeyboardButton("🔓 Разбанить студента", callback_data="admin_unban")],
     ]
     
-    # Только главный админ может назначать админов и просматривать список
+    # Только главный админ может назначать админов, VIP и просматривать логи
     if is_main_admin(user.id):
         keyboard.append([InlineKeyboardButton("👑 Выдать права админа", callback_data="admin_make_admin")])
         keyboard.append([InlineKeyboardButton("👑 Забрать права админа", callback_data="admin_remove_admin")])
+        keyboard.append([InlineKeyboardButton("👑 Выдать гл. админа", callback_data="admin_make_main_admin")])
+        keyboard.append([InlineKeyboardButton("👑 Снять гл. админа", callback_data="admin_remove_main_admin")])
+        keyboard.append([InlineKeyboardButton("⭐ Выдать VIP", callback_data="admin_give_vip")])
+        keyboard.append([InlineKeyboardButton("⭐ Снять VIP", callback_data="admin_take_vip")])
         keyboard.append([InlineKeyboardButton("📋 Список администраторов", callback_data="admin_list_admins")])
+        keyboard.append([InlineKeyboardButton("📝 Логи администратора", callback_data="admin_logs")])
+        keyboard.append([InlineKeyboardButton("💬 Доступные беседы", callback_data="admin_chats")])
+        keyboard.append([InlineKeyboardButton("⏰ Изменить время рассылки", callback_data="admin_change_time")])
     
     keyboard.append([InlineKeyboardButton("Назад", callback_data="main_menu")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("👑 Админ-панель:", reply_markup=reply_markup)
+
+# Начать изменение времени рассылки
+async def start_change_broadcast_time(query, context):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    context.user_data['awaiting_broadcast_time'] = True
+    await query.edit_message_text(
+        f"⏰ Текущее время рассылки: {BROADCAST_TIME}\n\n"
+        "Введите новое время в формате ЧЧ:ММ (например, 18:30):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+    )
 
 # Статистика
 async def show_admin_stats(query):
@@ -967,9 +1577,12 @@ async def show_admin_stats(query):
     total_users = len(users)
     banned_users = len([u for u in users if len(u) > 5 and u[5]])
     admin_users = len([u for u in users if (len(u) > 6 and u[6]) or u[0] in ADMIN_IDS])
+    main_admin_users = len([u for u in users if (len(u) > 8 and u[8]) or u[0] == MAIN_ADMIN_ID])
+    vip_users = len([u for u in users if len(u) > 7 and u[7]])
     
     chats = get_all_chats()
     total_chats = len(chats)
+    vip_chats = len([c for c in chats if len(c) > 5 and c[5]])
     
     group_stats = {}
     for user in users:
@@ -982,14 +1595,19 @@ async def show_admin_stats(query):
         f"👤 Пользователи:\n"
         f"Всего: {total_users}\n"
         f"Заблокированных: {banned_users}\n"
-        f"Администраторов: {admin_users}\n\n"
+        f"Администраторов: {admin_users}\n"
+        f"Главных админов: {main_admin_users}\n"
+        f"VIP пользователей: {vip_users}\n\n"
         f"💬 Чаты:\n"
-        f"Всего: {total_chats}\n\n"
+        f"Всего: {total_chats}\n"
+        f"VIP чатов: {vip_chats}\n\n"
         f"📚 По группам:\n"
     )
     
     for group, count in group_stats.items():
         stats_text += f"{group}: {count} пользователей\n"
+    
+    stats_text += f"\n⏰ Время рассылки: {BROADCAST_TIME}"
     
     await query.edit_message_text(
         stats_text,
@@ -1014,14 +1632,51 @@ async def show_admin_list(query):
     admin_list_text = "📋 Список администраторов:\n\n"
     
     for i, admin in enumerate(admins, 1):
-        user_id, username, first_name, group_name, last_active, is_banned, is_admin_db = admin
+        # Безопасное извлечение данных
+        user_id = admin[0]
+        username = admin[1] if len(admin) > 1 else None
+        first_name = admin[2] if len(admin) > 2 else "Неизвестно"
+        
         username_display = f"@{username}" if username else "Не указан"
-        status = "👑 Главный" if user_id == MAIN_ADMIN_ID else "✅ Админ"
+        
+        if user_id == MAIN_ADMIN_ID or (len(admin) > 8 and admin[8]):
+            status = "👑 Главный"
+        else:
+            status = "✅ Админ"
         
         admin_list_text += f"{i}. {username_display} ({first_name}) - {status}\n"
     
     await query.edit_message_text(
         admin_list_text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin_panel")]])
+    )
+
+# Показать логи администраторов
+async def show_admin_logs(query):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    logs = get_admin_logs(50)
+    
+    if not logs:
+        await query.edit_message_text(
+            "📝 Логи администраторов пусты.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin_panel")]])
+        )
+        return
+    
+    logs_text = "📝 Логи администраторов (последние 50):\n\n"
+    
+    for log in logs:
+        log_id, admin_username, admin_user_id, action, timestamp = log
+        timestamp_str = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+        admin_display = f"@{admin_username}" if admin_username else f"ID: {admin_user_id}"
+        
+        logs_text += f"🕒 {timestamp_str}\n👤 {admin_display}\n📝 {action}\n\n"
+    
+    await query.edit_message_text(
+        logs_text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="admin_panel")]])
     )
 
@@ -1139,6 +1794,35 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
     
+    # Обработка изменения времени рассылки
+    elif context.user_data.get('awaiting_broadcast_time'):
+        new_time = update.message.text.strip()
+        try:
+            # Проверяем формат времени
+            datetime.strptime(new_time, '%H:%M')
+            global BROADCAST_TIME
+            BROADCAST_TIME = new_time
+            context.user_data['awaiting_broadcast_time'] = False
+            
+            # Логируем действие
+            log_admin_action(
+                user.username,
+                user.id,
+                f"Изменил время рассылки на {new_time}"
+            )
+            
+            await update.message.reply_text(
+                f"✅ Время рассылки изменено на {new_time}\n\n"
+                f"Рассылка будет выполняться каждый день в {new_time}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат времени!\n\n"
+                "Введите время в формате ЧЧ:ММ (например, 18:30):",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+            )
+    
     # Обработка бана пользователя
     elif context.user_data.get('awaiting_ban'):
         if update.message.text.startswith('@'):
@@ -1147,6 +1831,12 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_ban:
                 if ban_user(user_to_ban[0]):
                     context.user_data['awaiting_ban'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Заблокировал пользователя @{username}"
+                    )
                     await update.message.reply_text(
                         f"✅ Пользователь @{username} заблокирован!",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
@@ -1166,6 +1856,12 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_unban:
                 if unban_user(user_to_unban[0]):
                     context.user_data['awaiting_unban'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Разблокировал пользователя @{username}"
+                    )
                     await update.message.reply_text(
                         f"✅ Пользователь @{username} разблокирован!",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
@@ -1185,6 +1881,12 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_admin:
                 if make_admin(user_to_admin[0]):
                     context.user_data['awaiting_make_admin'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Выдал права администратора пользователю @{username}"
+                    )
                     await update.message.reply_text(
                         f"✅ Пользователю @{username} выданы права администратора!",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
@@ -1204,12 +1906,118 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if user_to_remove_admin:
                 if remove_admin(user_to_remove_admin[0]):
                     context.user_data['awaiting_remove_admin'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Снял права администратора у пользователя @{username}"
+                    )
                     await update.message.reply_text(
                         f"✅ У пользователя @{username} сняты права администратора!",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
                     )
                 else:
                     await update.message.reply_text("❌ Ошибка при снятии прав администратора!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка выдачи прав главного администратора
+    elif context.user_data.get('awaiting_make_main_admin'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_main_admin = find_user_by_username(username)
+            if user_to_main_admin:
+                if make_main_admin(user_to_main_admin[0]):
+                    context.user_data['awaiting_make_main_admin'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Выдал права главного администратора пользователю @{username}"
+                    )
+                    await update.message.reply_text(
+                        f"✅ Пользователю @{username} выданы права главного администратора!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при выдаче прав главного администратора!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка снятия прав главного администратора
+    elif context.user_data.get('awaiting_remove_main_admin'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_remove_main_admin = find_user_by_username(username)
+            if user_to_remove_main_admin:
+                if remove_main_admin(user_to_remove_main_admin[0]):
+                    context.user_data['awaiting_remove_main_admin'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Снял права главного администратора у пользователя @{username}"
+                    )
+                    await update.message.reply_text(
+                        f"✅ У пользователя @{username} сняты права главного администратора!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при снятии прав главного администратора!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка выдачи VIP статуса
+    elif context.user_data.get('awaiting_give_vip'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_vip = find_user_by_username(username)
+            if user_to_vip:
+                if give_vip(user_to_vip[0]):
+                    context.user_data['awaiting_give_vip'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Выдал VIP статус пользователю @{username}"
+                    )
+                    await update.message.reply_text(
+                        f"✅ Пользователю @{username} выдан VIP статус!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при выдаче VIP статуса!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка снятия VIP статуса
+    elif context.user_data.get('awaiting_take_vip'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_unvip = find_user_by_username(username)
+            if user_to_unvip:
+                if take_vip(user_to_unvip[0]):
+                    context.user_data['awaiting_take_vip'] = False
+                    # Логируем действие
+                    log_admin_action(
+                        user.username,
+                        user.id,
+                        f"Снял VIP статус у пользователя @{username}"
+                    )
+                    await update.message.reply_text(
+                        f"✅ У пользователя @{username} снят VIP статус!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при снятии VIP статуса!")
             else:
                 await update.message.reply_text("❌ Пользователь с таким username не найден!")
         else:
@@ -1328,6 +2136,13 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
     )
     
+    # Логируем действие
+    log_admin_action(
+        query.from_user.username,
+        query.from_user.id,
+        f"Сделал рассылку для {groups_text}. Успешно: {sent_count}, Не удалось: {failed_count}"
+    )
+    
     # Очищаем данные рассылки
     context.user_data.pop('broadcast_content', None)
     context.user_data.pop('selected_groups', None)
@@ -1358,7 +2173,7 @@ async def confirm_schedule_broadcast(query, context):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# Отправка расписания сейчас
+# Отправка расписания сейчас (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 async def send_schedule_broadcast_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1371,6 +2186,13 @@ async def send_schedule_broadcast_now(update: Update, context: ContextTypes.DEFA
     
     # Используем существующую функцию рассылки
     await send_daily_schedule(context)
+    
+    # Логируем действие
+    log_admin_action(
+        query.from_user.username,
+        query.from_user.id,
+        "Выполнил ручную рассылку расписания"
+    )
     
     await query.edit_message_text(
         "✅ Рассылка расписания завершена!",
@@ -1425,20 +2247,77 @@ async def start_remove_admin(query, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
     )
 
-# Рассылка расписания (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# Начать выдачу прав главного администратора по username
+async def start_make_main_admin(query, context):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    context.user_data['awaiting_make_main_admin'] = True
+    await query.edit_message_text(
+        "Введите @username пользователя для выдачи прав главного администратора (например, @username):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+    )
+
+# Начать снятие прав главного администратора по username
+async def start_remove_main_admin(query, context):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    context.user_data['awaiting_remove_main_admin'] = True
+    await query.edit_message_text(
+        "Введите @username пользователя для снятия прав главного администратора (например, @username):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+    )
+
+# Начать выдачу VIP статуса по username
+async def start_give_vip(query, context):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    context.user_data['awaiting_give_vip'] = True
+    await query.edit_message_text(
+        "Введите @username пользователя для выдачи VIP статуса (например, @username):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+    )
+
+# Начать снятие VIP статуса по username
+async def start_take_vip(query, context):
+    if not is_main_admin(query.from_user.id):
+        await query.edit_message_text("❌ Эта функция доступна только главному администратору!")
+        return
+    
+    context.user_data['awaiting_take_vip'] = True
+    await query.edit_message_text(
+        "Введите @username пользователя для снятия VIP статуса (например, @username):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
+    )
+
+# Рассылка расписания (ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ) с правильной логикой VIP
 async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
     tomorrow = datetime.now() + timedelta(days=1)
     weekday = get_russian_weekday(tomorrow)
     week_number, week_type = get_current_week()
     
+    logger.info(f"🔄 Начинаю ежедневную рассылку расписания на {tomorrow.strftime('%d.%m.%Y')} ({weekday})")
+    
     # Для каждой группы отправляем расписание только соответствующим пользователям и чатам
     for group_name in GROUPS:
-        # Получаем пользователей этой группы
+        # Получаем обычных пользователей этой группы
         users = get_users_by_group(group_name)
         
-        # Получаем чаты, где есть пользователи этой группы
+        # Получаем VIP пользователей этой группы
+        vip_users = get_vip_users_by_group(group_name)
+        
+        # Получаем обычные чаты этой группы
         chats = get_chats_by_group(group_name)
         
+        # Получаем VIP чаты этой группы
+        vip_chats = get_vip_chats_by_group(group_name)
+        
+        # Обычное расписание
         if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and weekday in SCHEDULE[group_name][week_type]:
             schedule_text = SCHEDULE[group_name][week_type][weekday]
             message = (
@@ -1449,21 +2328,62 @@ async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
         else:
             message = f"На завтра ({weekday}) расписание для группы {group_name} не найдено."
         
-        # Рассылка пользователям
+        # VIP расписание
+        vip_schedule = get_vip_schedule(group_name, weekday, week_type, week_number)
+        vip_message = (
+            f"⭐ VIP РАСПИСАНИЕ на завтра ({weekday}) для группы {group_name}:\n\n"
+            f"{vip_schedule}\n\n"
+            f"({week_type} неделя, неделя №{week_number})"
+        )
+        
+        # Рассылка обычным пользователям (ТОЛЬКО обычное расписание)
         for user_data in users:
             user_id = user_data[0]
-            try:
-                await context.bot.send_message(chat_id=user_id, text=message)
-            except Exception as e:
-                logger.error(f"Не удалось отправить расписание пользователю {user_id}: {e}")
+            # Проверяем, не является ли пользователь VIP с включенным режимом
+            if not (has_vip_status(user_id) and get_vip_mode(user_id)):
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=message)
+                    logger.info(f"✅ Отправлено обычное расписание пользователю {user_id}")
+                except Exception as e:
+                    logger.error(f"❌ Не удалось отправить расписание пользователю {user_id}: {e}")
         
-        # Рассылка в чаты
+        # Рассылка VIP пользователям (ТОЛЬКО VIP расписание если режим включен)
+        for user_data in vip_users:
+            user_id = user_data[0]
+            # Проверяем, включен ли VIP режим у пользователя
+            if get_vip_mode(user_id):
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=vip_message)
+                    logger.info(f"✅ Отправлено VIP расписание пользователю {user_id}")
+                except Exception as e:
+                    logger.error(f"❌ Не удалось отправить VIP расписание пользователю {user_id}: {e}")
+            else:
+                # Если VIP режим выключен, отправляем обычное расписание
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=message)
+                    logger.info(f"✅ Отправлено обычное расписание VIP пользователю {user_id} (режим выключен)")
+                except Exception as e:
+                    logger.error(f"❌ Не удалось отправить расписание VIP пользователю {user_id}: {e}")
+        
+        # Рассылка в обычные чаты (ТОЛЬКО обычное расписание)
         for chat_data in chats:
             chat_id = chat_data[0]
+            # Проверяем, не является ли чат VIP
+            if not is_chat_vip(chat_id):
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=message)
+                    logger.info(f"✅ Отправлено обычное расписание в чат {chat_id}")
+                except Exception as e:
+                    logger.error(f"❌ Не удалось отправить расписание в чат {chat_id}: {e}")
+        
+        # Рассылка в VIP чаты (ТОЛЬКО VIP расписание)
+        for chat_data in vip_chats:
+            chat_id = chat_data[0]
             try:
-                await context.bot.send_message(chat_id=chat_id, text=message)
+                await context.bot.send_message(chat_id=chat_id, text=vip_message)
+                logger.info(f"✅ Отправлено VIP расписание в VIP чат {chat_id}")
             except Exception as e:
-                logger.error(f"Не удалось отправить расписание в чат {chat_id}: {e}")
+                logger.error(f"❌ Не удалось отправить VIP расписание в VIP чат {chat_id}: {e}")
     
     # Отправляем общее сообщение в чаты без выбранной группы
     all_chats = get_all_chats()
@@ -1487,15 +2407,22 @@ async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
             )
             try:
                 await context.bot.send_message(chat_id=chat_id, text=message)
+                logger.info(f"✅ Отправлено общее сообщение в чат {chat_id}")
             except Exception as e:
-                logger.error(f"Не удалось отправить общее сообщение в чат {chat_id}: {e}")
+                logger.error(f"❌ Не удалось отправить общее сообщение в чат {chat_id}: {e}")
+    
+    logger.info("✅ Ежедневная рассылка расписания завершена")
 
 # Обработчик всех сообщений
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Игнорируем сообщения из групповых чатов (кроме команды /start и /group)
     if (update.effective_chat.type in ['group', 'supergroup'] and 
         not update.message.text.startswith('/start') and 
-        not update.message.text.startswith('/group')):
+        not update.message.text.startswith('/group') and
+        not update.message.text.startswith('/givevip') and
+        not update.message.text.startswith('/takevip') and
+        not update.message.text.startswith('/zakladka') and
+        not update.message.text.startswith('/gangbang')):
         return
     
     user = update.effective_user
@@ -1507,11 +2434,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Основная функция
 def main():
+    # Добавляем более детальное логирование для отладки
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("group", group_command))
+    application.add_handler(CommandHandler("givevip", givevip_command))
+    application.add_handler(CommandHandler("takevip", takevip_command))
+    application.add_handler(CommandHandler("zakladka", zakladka_command))
+    application.add_handler(CommandHandler("gangbang", gangbang_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
     # Обработчик для всех сообщений от админов (включая медиа)
@@ -1525,16 +2459,16 @@ def main():
     
     job_queue = application.job_queue
     if job_queue:
-        # Рассылка расписания каждый день в 19:00
+        # Рассылка расписания каждый день в установленное время
         job_queue.run_daily(
             send_daily_schedule, 
-            time=datetime.strptime("19:00", "%H:%M").time()
+            time=datetime.strptime(BROADCAST_TIME, "%H:%M").time()
         )
-        print("Ежедневная рассылка настроена на 19:00")
+        logger.info(f"✅ Ежедневная рассылка настроена на {BROADCAST_TIME}")
     else:
-        print("Предупреждение: JobQueue не доступна")
+        logger.error("❌ JobQueue не доступна")
     
-    print("Бот запускается...")
+    logger.info("✅ Бот запускается...")
     application.run_polling()
 
 if __name__ == "__main__":
