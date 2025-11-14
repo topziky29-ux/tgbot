@@ -265,7 +265,7 @@ SCHEDULE = {
             "Воскресенье": "Выходной"
         }
     }
- }
+}
  
 # Заполняем расписание для остальных групп
 for group in GROUPS:
@@ -407,6 +407,24 @@ def get_all_chats():
         return chats
     except Exception as e:
         logger.error(f"Ошибка при получении чатов: {e}")
+        return []
+
+# Получение чатов по группе
+def get_chats_by_group(group_name):
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT c.chat_id, c.chat_title 
+            FROM chats c
+            JOIN chat_users cu ON c.chat_id = cu.chat_id
+            WHERE cu.group_name = ? AND c.is_active = TRUE
+        ''', (group_name,))
+        chats = cursor.fetchall()
+        conn.close()
+        return chats
+    except Exception as e:
+        logger.error(f"Ошибка при получении чатов группы {group_name}: {e}")
         return []
 
 # Добавление чата
@@ -1045,9 +1063,275 @@ async def start_broadcast_message(query, context):
     
     await query.edit_message_text(
         f"Выбрана рассылка для: {groups_text}\n\n"
-        "Введите сообщение для рассылки:",
+        "Отправьте сообщение для рассылки (текст, фото или видео):",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
     )
+
+# Обработчик админ-сообщений (РАБОТАЕТ С МЕДИА НА 100%)
+async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        return
+    
+    # Если ожидаем рассылку, обрабатываем любой контент
+    if context.user_data.get('awaiting_broadcast'):
+        selected_groups = context.user_data.get('selected_groups', [])
+        message = update.message
+        
+        # Определяем тип контента
+        if message.photo:
+            # Фото с подписью или без
+            content_type = 'photo'
+            file_id = message.photo[-1].file_id
+            caption = message.caption or ''
+            content_preview = f"📷 Фото + текст:\n{caption if caption else 'Без текста'}"
+        elif message.video:
+            # Видео с подписью или без
+            content_type = 'video'
+            file_id = message.video.file_id
+            caption = message.caption or ''
+            content_preview = f"🎥 Видео + текст:\n{caption if caption else 'Без текста'}"
+        elif message.text:
+            # Текстовое сообщение
+            content_type = 'text'
+            text_content = message.text
+            content_preview = f"📝 Текст:\n{text_content}"
+        else:
+            await update.message.reply_text("❌ Неподдерживаемый тип сообщения. Отправьте текст, фото или видео.")
+            return
+        
+        # Сохраняем данные рассылки
+        context.user_data['broadcast_content'] = {
+            'type': content_type,
+            'text': text_content if content_type == 'text' else caption,
+            'file_id': file_id if content_type in ['photo', 'video'] else None
+        }
+        
+        context.user_data['awaiting_broadcast'] = False
+        
+        # Получаем список получателей
+        if selected_groups == "all":
+            users = get_active_users()
+            chats = get_all_chats()
+            groups_text = "ВСЕМ ГРУППАМ"
+        else:
+            users = []
+            chats = []
+            for group in selected_groups:
+                users.extend(get_users_by_group(group))
+                chats.extend(get_chats_by_group(group))
+            groups_text = ", ".join(selected_groups)
+        
+        total_recipients = len(users) + len(chats)
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, отправить", callback_data="confirm_broadcast")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+        ]
+        
+        await update.message.reply_text(
+            f"Подтвердите рассылку для: {groups_text}\n\n"
+            f"{content_preview}\n\n"
+            f"Получателей: {total_recipients}\n"
+            f"(Пользователи: {len(users)}, Чаты: {len(chats)})",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    
+    # Обработка бана пользователя
+    elif context.user_data.get('awaiting_ban'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_ban = find_user_by_username(username)
+            if user_to_ban:
+                if ban_user(user_to_ban[0]):
+                    context.user_data['awaiting_ban'] = False
+                    await update.message.reply_text(
+                        f"✅ Пользователь @{username} заблокирован!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при блокировке пользователя!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка разбана пользователя
+    elif context.user_data.get('awaiting_unban'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_unban = find_user_by_username(username)
+            if user_to_unban:
+                if unban_user(user_to_unban[0]):
+                    context.user_data['awaiting_unban'] = False
+                    await update.message.reply_text(
+                        f"✅ Пользователь @{username} разблокирован!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при разблокировке пользователя!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка выдачи прав администратора
+    elif context.user_data.get('awaiting_make_admin'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_admin = find_user_by_username(username)
+            if user_to_admin:
+                if make_admin(user_to_admin[0]):
+                    context.user_data['awaiting_make_admin'] = False
+                    await update.message.reply_text(
+                        f"✅ Пользователю @{username} выданы права администратора!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при выдаче прав администратора!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+    
+    # Обработка снятия прав администратора
+    elif context.user_data.get('awaiting_remove_admin'):
+        if update.message.text.startswith('@'):
+            username = update.message.text[1:]  # Убираем @
+            user_to_remove_admin = find_user_by_username(username)
+            if user_to_remove_admin:
+                if remove_admin(user_to_remove_admin[0]):
+                    context.user_data['awaiting_remove_admin'] = False
+                    await update.message.reply_text(
+                        f"✅ У пользователя @{username} сняты права администратора!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка при снятии прав администратора!")
+            else:
+                await update.message.reply_text("❌ Пользователь с таким username не найден!")
+        else:
+            await update.message.reply_text("❌ Введите username в формате @username")
+
+# Подтверждение и отправка рассылки (РАБОТАЕТ С МЕДИА НА 100%)
+async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("Доступ запрещен!")
+        return
+    
+    content_data = context.user_data.get('broadcast_content', {})
+    selected_groups = context.user_data.get('selected_groups', [])
+    
+    if not content_data:
+        await query.edit_message_text("Ошибка: данные рассылки не найдены")
+        return
+    
+    if selected_groups == "all":
+        users = get_active_users()
+        chats = get_all_chats()
+        groups_text = "ВСЕМ ГРУППАМ"
+    else:
+        users = []
+        chats = []
+        for group in selected_groups:
+            users.extend(get_users_by_group(group))
+            chats.extend(get_chats_by_group(group))
+        groups_text = ", ".join(selected_groups)
+    
+    sent_count = 0
+    failed_count = 0
+    
+    total_recipients = len(users) + len(chats)
+    await query.edit_message_text(f"🔄 Начинаю рассылку для: {groups_text}\n\n0/{total_recipients}")
+    
+    # Рассылка пользователям
+    for i, user_data in enumerate(users):
+        user_id = user_data[0]
+        try:
+            if content_data['type'] == 'text':
+                await context.bot.send_message(
+                    chat_id=user_id, 
+                    text=content_data['text']
+                )
+            elif content_data['type'] == 'photo':
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=content_data['file_id'],
+                    caption=content_data['text']
+                )
+            elif content_data['type'] == 'video':
+                await context.bot.send_video(
+                    chat_id=user_id,
+                    video=content_data['file_id'],
+                    caption=content_data['text']
+                )
+            sent_count += 1
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
+        
+        # Обновляем прогресс каждые 10 пользователей
+        if i % 10 == 0 or i == len(users) - 1:
+            progress = i + 1
+            await query.edit_message_text(f"🔄 Рассылка для: {groups_text}\nПользователи... {progress}/{len(users)}")
+    
+    # Рассылка в чаты
+    for j, chat_data in enumerate(chats):
+        chat_id = chat_data[0]
+        try:
+            if content_data['type'] == 'text':
+                await context.bot.send_message(
+                    chat_id=chat_id, 
+                    text=content_data['text']
+                )
+            elif content_data['type'] == 'photo':
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=content_data['file_id'],
+                    caption=content_data['text']
+                )
+            elif content_data['type'] == 'video':
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=content_data['file_id'],
+                    caption=content_data['text']
+                )
+            sent_count += 1
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Ошибка отправки в чат {chat_id}: {e}")
+        
+        # Обновляем прогресс каждые 5 чатов
+        if j % 5 == 0 or j == len(chats) - 1:
+            progress = j + 1
+            await query.edit_message_text(f"🔄 Рассылка для: {groups_text}\nЧаты... {progress}/{len(chats)}")
+    
+    # Формируем текст результата
+    content_type_text = {
+        'text': '📝 Текст',
+        'photo': '📷 Фото', 
+        'video': '🎥 Видео'
+    }
+    
+    await query.edit_message_text(
+        f"✅ Рассылка завершена!\n\n"
+        f"Для: {groups_text}\n"
+        f"Тип: {content_type_text.get(content_data['type'], 'Неизвестно')}\n"
+        f"Успешно: {sent_count}\n"
+        f"Не удалось: {failed_count}\n"
+        f"Всего получателей: {total_recipients}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
+    )
+    
+    # Очищаем данные рассылки
+    context.user_data.pop('broadcast_content', None)
+    context.user_data.pop('selected_groups', None)
+    context.user_data.pop('awaiting_broadcast', None)
 
 # Подтверждение рассылки расписания
 async def confirm_schedule_broadcast(query, context):
@@ -1141,256 +1425,70 @@ async def start_remove_admin(query, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="admin_panel")]])
     )
 
-# Обработчик админ-сообщений
-async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    
-    if not is_admin(user.id):
-        return
-    
-    message_text = update.message.text.strip()
-    
-    if context.user_data.get('awaiting_broadcast'):
-        selected_groups = context.user_data.get('selected_groups', [])
-        
-        if selected_groups == "all":
-            users = get_active_users()
-            groups_text = "ВСЕМ ГРУППАМ"
-        else:
-            users = []
-            for group in selected_groups:
-                users.extend(get_users_by_group(group))
-            groups_text = ", ".join(selected_groups)
-        
-        chats = get_all_chats()
-        total_recipients = len(users) + len(chats)
-        
-        context.user_data['broadcast_message'] = message_text
-        context.user_data['broadcast_groups'] = selected_groups
-        context.user_data['awaiting_broadcast'] = False
-        
-        keyboard = [
-            [InlineKeyboardButton("✅ Да, отправить", callback_data="confirm_broadcast")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-        ]
-        
-        await update.message.reply_text(
-            f"Подтвердите рассылку для: {groups_text}\n\n"
-            f"Сообщение:\n{message_text}\n\n"
-            f"Получателей: {total_recipients}\n"
-            f"(Пользователи: {len(users)}, Чаты: {len(chats)})",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif context.user_data.get('awaiting_ban'):
-        if message_text.startswith('@'):
-            username = message_text[1:]  # Убираем @
-            user_to_ban = find_user_by_username(username)
-            if user_to_ban:
-                if ban_user(user_to_ban[0]):
-                    context.user_data['awaiting_ban'] = False
-                    await update.message.reply_text(
-                        f"✅ Пользователь @{username} заблокирован!",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
-                    )
-                else:
-                    await update.message.reply_text("❌ Ошибка при блокировке пользователя!")
-            else:
-                await update.message.reply_text("❌ Пользователь с таким username не найден!")
-        else:
-            await update.message.reply_text("❌ Введите username в формате @username")
-    
-    elif context.user_data.get('awaiting_unban'):
-        if message_text.startswith('@'):
-            username = message_text[1:]  # Убираем @
-            user_to_unban = find_user_by_username(username)
-            if user_to_unban:
-                if unban_user(user_to_unban[0]):
-                    context.user_data['awaiting_unban'] = False
-                    await update.message.reply_text(
-                        f"✅ Пользователь @{username} разблокирован!",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
-                    )
-                else:
-                    await update.message.reply_text("❌ Ошибка при разблокировке пользователя!")
-            else:
-                await update.message.reply_text("❌ Пользователь с таким username не найден!")
-        else:
-            await update.message.reply_text("❌ Введите username в формате @username")
-    
-    elif context.user_data.get('awaiting_make_admin'):
-        if message_text.startswith('@'):
-            username = message_text[1:]  # Убираем @
-            user_to_admin = find_user_by_username(username)
-            if user_to_admin:
-                if make_admin(user_to_admin[0]):
-                    context.user_data['awaiting_make_admin'] = False
-                    await update.message.reply_text(
-                        f"✅ Пользователю @{username} выданы права администратора!",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
-                    )
-                else:
-                    await update.message.reply_text("❌ Ошибка при выдаче прав администратора!")
-            else:
-                await update.message.reply_text("❌ Пользователь с таким username не найден!")
-        else:
-            await update.message.reply_text("❌ Введите username в формате @username")
-    
-    elif context.user_data.get('awaiting_remove_admin'):
-        if message_text.startswith('@'):
-            username = message_text[1:]  # Убираем @
-            user_to_remove_admin = find_user_by_username(username)
-            if user_to_remove_admin:
-                if remove_admin(user_to_remove_admin[0]):
-                    context.user_data['awaiting_remove_admin'] = False
-                    await update.message.reply_text(
-                        f"✅ У пользователя @{username} сняты права администратора!",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
-                    )
-                else:
-                    await update.message.reply_text("❌ Ошибка при снятии прав администратора!")
-            else:
-                await update.message.reply_text("❌ Пользователь с таким username не найден!")
-        else:
-            await update.message.reply_text("❌ Введите username в формате @username")
-
-# Подтверждение и отправка рассылки
-async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("Доступ запрещен!")
-        return
-    
-    message_text = context.user_data.get('broadcast_message', '')
-    selected_groups = context.user_data.get('broadcast_groups', [])
-    
-    if not message_text:
-        await query.edit_message_text("Ошибка: сообщение не найдено")
-        return
-    
-    if selected_groups == "all":
-        users = get_active_users()
-        groups_text = "ВСЕМ ГРУППАМ"
-    else:
-        users = []
-        for group in selected_groups:
-            users.extend(get_users_by_group(group))
-        groups_text = ", ".join(selected_groups)
-    
-    chats = get_all_chats()
-    
-    sent_count = 0
-    failed_count = 0
-    
-    total_recipients = len(users) + len(chats)
-    await query.edit_message_text(f"Начинаю рассылку для: {groups_text}\n\n0/{total_recipients}")
-    
-    # Рассылка пользователям
-    for i, user_data in enumerate(users):
-        user_id = user_data[0]
-        try:
-            await context.bot.send_message(chat_id=user_id, text=message_text)
-            sent_count += 1
-        except Exception as e:
-            failed_count += 1
-        
-        if i % 10 == 0:
-            await query.edit_message_text(f"Рассылка для: {groups_text}\nПользователи... {i+1}/{len(users)}")
-    
-    # Рассылка в чаты
-    for j, chat_data in enumerate(chats):
-        chat_id = chat_data[0]
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=message_text)
-            sent_count += 1
-        except Exception as e:
-            failed_count += 1
-        
-        if j % 5 == 0:
-            await query.edit_message_text(f"Рассылка для: {groups_text}\nЧаты... {j+1}/{len(chats)}")
-    
-    await query.edit_message_text(
-        f"✅ Рассылка завершена!\n\n"
-        f"Для: {groups_text}\n"
-        f"Успешно: {sent_count}\n"
-        f"Не удалось: {failed_count}\n"
-        f"Всего получателей: {total_recipients}",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В админ-панель", callback_data="admin_panel")]])
-    )
-
 # Рассылка расписания (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
     tomorrow = datetime.now() + timedelta(days=1)
     weekday = get_russian_weekday(tomorrow)
     week_number, week_type = get_current_week()
     
-    all_users = get_active_users()
-    all_chats = get_all_chats()
-    
-    # Рассылка пользователям
-    for user_data in all_users:
-        if len(user_data) > 3 and user_data[3]:
-            user_id, username, first_name, group_name, last_active = user_data[0], user_data[1], user_data[2], user_data[3], user_data[4]
-            
-            if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and weekday in SCHEDULE[group_name][week_type]:
-                schedule_text = SCHEDULE[group_name][week_type][weekday]
-                message = (
-                    f"📅 Расписание на завтра ({weekday}) для группы {group_name}:\n\n"
-                    f"{schedule_text}\n\n"
-                    f"({week_type} неделя, неделя №{week_number})"
-                )
-            else:
-                message = f"На завтра ({weekday}) расписание для группы {group_name} не найдено."
-            
+    # Для каждой группы отправляем расписание только соответствующим пользователям и чатам
+    for group_name in GROUPS:
+        # Получаем пользователей этой группы
+        users = get_users_by_group(group_name)
+        
+        # Получаем чаты, где есть пользователи этой группы
+        chats = get_chats_by_group(group_name)
+        
+        if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and weekday in SCHEDULE[group_name][week_type]:
+            schedule_text = SCHEDULE[group_name][week_type][weekday]
+            message = (
+                f"📅 Расписание на завтра ({weekday}) для группы {group_name}:\n\n"
+                f"{schedule_text}\n\n"
+                f"({week_type} неделя, неделя №{week_number})"
+            )
+        else:
+            message = f"На завтра ({weekday}) расписание для группы {group_name} не найдено."
+        
+        # Рассылка пользователям
+        for user_data in users:
+            user_id = user_data[0]
             try:
                 await context.bot.send_message(chat_id=user_id, text=message)
             except Exception as e:
-                logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+                logger.error(f"Не удалось отправить расписание пользователю {user_id}: {e}")
+        
+        # Рассылка в чаты
+        for chat_data in chats:
+            chat_id = chat_data[0]
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=message)
+            except Exception as e:
+                logger.error(f"Не удалось отправить расписание в чат {chat_id}: {e}")
     
-    # Рассылка в чаты (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+    # Отправляем общее сообщение в чаты без выбранной группы
+    all_chats = get_all_chats()
+    chats_with_groups = set()
+    
+    # Собираем все чаты, у которых есть выбранные группы
+    for group_name in GROUPS:
+        group_chats = get_chats_by_group(group_name)
+        for chat in group_chats:
+            chats_with_groups.add(chat[0])
+    
+    # Отправляем сообщение только в чаты без выбранной группы
     for chat_data in all_chats:
         chat_id = chat_data[0]
-        
-        # Получаем всех пользователей этого чата и их группы
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT DISTINCT group_name FROM chat_users WHERE chat_id = ?', (chat_id,))
-        chat_groups = cursor.fetchall()
-        conn.close()
-        
-        if chat_groups:
-            # Если в чате есть пользователи с выбранными группами
-            for group_data in chat_groups:
-                group_name = group_data[0]
-                if group_name in SCHEDULE and week_type in SCHEDULE[group_name] and weekday in SCHEDULE[group_name][week_type]:
-                    schedule_text = SCHEDULE[group_name][week_type][weekday]
-                    message = (
-                        f"📅 Расписание на завтра ({weekday}) для группы {group_name}:\n\n"
-                        f"{schedule_text}\n\n"
-                        f"({week_type} неделя, неделя №{week_number})"
-                    )
-                else:
-                    message = f"На завтра ({weekday}) расписание для группы {group_name} не найдено."
-                
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=message)
-                except Exception as e:
-                    logger.error(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
-        else:
-            # Если в чате нет пользователей с выбранными группами, отправляем общее сообщение
+        if chat_id not in chats_with_groups:
             message = (
                 f"📅 Расписание на завтра ({weekday}):\n\n"
                 f"({week_type} неделя, неделя №{week_number})\n\n"
                 f"Для получения полного расписания вашей группы "
                 f"используйте команду /group в этом чате."
             )
-            
             try:
                 await context.bot.send_message(chat_id=chat_id, text=message)
             except Exception as e:
-                logger.error(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
+                logger.error(f"Не удалось отправить общее сообщение в чат {chat_id}: {e}")
 
 # Обработчик всех сообщений
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1415,13 +1513,23 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("group", group_command))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_messages))
+    
+    # Обработчик для всех сообщений от админов (включая медиа)
+    application.add_handler(MessageHandler(
+        filters.TEXT | filters.PHOTO | filters.VIDEO, 
+        handle_admin_messages
+    ))
+    
     application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
     application.add_error_handler(error_handler)
     
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_daily(send_daily_schedule, time=datetime.strptime("19:00", "%H:%M").time())
+        # Рассылка расписания каждый день в 19:00
+        job_queue.run_daily(
+            send_daily_schedule, 
+            time=datetime.strptime("19:00", "%H:%M").time()
+        )
         print("Ежедневная рассылка настроена на 19:00")
     else:
         print("Предупреждение: JobQueue не доступна")
