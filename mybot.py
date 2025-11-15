@@ -1858,6 +1858,164 @@ async def gangbang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Их девиз был: скорость, напор, семь голов – один удар! Мы не идем в обход, мы идем напролом. "
         "Дриблинг, пас, гол – вот наш ритм. Готовы к буму? Но команда распалась 30 октября 2025 года."
     )
+# Команда /chlen - скрытая команда (нейтральная версия)
+async def chlen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    size = random.randint(1, 99)
+    await update.message.reply_text(
+        f"{user.first_name} 📏 Твой член составляет: {size} см"
+    )
+
+# Добавьте эти команды после команды /gangbang
+
+# Команда /chlen - скрытая команда (нейтральная версия)
+async def chlen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    size = random.randint(1, 99)
+    await update.message.reply_text(
+        f"{user.first_name} 📏 Размер твоего члена составляет: {size} см"
+    )
+
+# Команда /siski - скрытая команда (нейтральная версия)
+async def siski_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    size = random.randint(0, 7)
+    
+    if size <= 2:
+        comment = "Маленькие у тебя сиськи кнш"
+    else:
+        comment = "Вот это у тебя сисяндры, я бы их бррррр"
+    
+    await update.message.reply_text(
+        f"{user.first_name} 🍒 Размер твоих сисек: {size}\n{comment}"
+    )
+# Команда /seks - предсказание даты
+async def seks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Генерация случайной даты между 15.11.2025 и 15.11.2026
+    start_date = datetime(2025, 11, 15)
+    end_date = datetime(2026, 11, 15)
+    
+    # Разница в днях между датами
+    delta = end_date - start_date
+    random_days = random.randint(0, delta.days)
+    
+    # Случайная дата
+    random_date = start_date + timedelta(days=random_days)
+    
+    # Случайное время (с 18:00 до 23:59)
+    random_hour = random.randint(18, 23)
+    random_minute = random.randint(0, 59)
+    
+    # Форматируем дату и время
+    date_str = random_date.strftime("%d.%m.%Y")
+    time_str = f"{random_hour:02d}:{random_minute:02d}"
+    
+    await update.message.reply_text(
+        f"{user.first_name} 💘 У тебя будет секс:\n📅 {date_str} в {time_str}"
+    )
+
+# Команда /drochka - статистика
+async def drochka_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Генерация случайного числа от 500 до 1999
+    count = random.randint(500, 1999)
+    
+    # Определение статуса по количеству
+    if 500 <= count <= 900:
+        status = "Fucking slave"
+    elif 901 <= count <= 1200:
+        status = "Jabroni"
+    elif 1201 <= count <= 1500:
+        status = "Boy next door"
+    elif 1501 <= count <= 1700:
+        status = "Dungen master"
+    elif 1701 <= count <= 1900:
+        status = "Full master"
+    else:  # 1901-1999
+        status = "Boss of the Gym"
+    
+    await update.message.reply_text(
+        f"{user.first_name} 💪 С рождения ты подрочил уже: {count} раз\n"
+        f"🏆 Твой статус дрочилы: {status}"
+    )
+# Команда /minet - предпочтения
+async def minet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Генерация случайного процента от 0 до 100
+    percent = random.randint(0, 100)
+    
+    await update.message.reply_text(
+        f"{user.first_name} 👄 Ты любишь минет на {percent}%"
+    )
+
+# Команда /kyni - предпочтения  
+async def kyni_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Генерация случайного процента от 0 до 100
+    percent = random.randint(0, 100)
+    
+    await update.message.reply_text(
+        f"{user.first_name} 👅 Ты любишь куни на {percent}%"
+    )
+
+# Команда /car - определение машины
+async def car_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Список марок и моделей автомобилей от старых до новых
+    cars = [
+        # Старые классические автомобили
+        "Ford Model T (1908)", "Chevrolet Series C (1912)", "Volkswagen Beetle (1938)",
+        "Citroën Traction Avant (1934)", "GAZ-M20 Pobeda (1946)", "Moskvich-400 (1946)",
+        "ZIS-110 (1945)", "Mercedes-Benz 170 (1946)", "Opel Kapitän (1948)",
+        
+        # Автомобили 50-60х годов
+        "Chevrolet Bel Air (1955)", "Ford Thunderbird (1955)", "Cadillac Eldorado (1959)",
+        "Volga GAZ-21 (1956)", "ZAZ-965 Zaporozhets (1960)", "Fiat 124 (1966)",
+        "VAZ-2101 Zhiguli (1970)", "Moskvich-412 (1967)", "GAZ-24 Volga (1968)",
+        
+        # Автомобили 70-80х годов
+        "VAZ-2106 Zhiguli (1976)", "Ford Granada (1972)", "Opel Rekord (1972)",
+        "Mercedes-Benz W123 (1975)", "BMW E21 (1975)", "Audi 80 (1972)",
+        "Lada Samara (1984)", "ZAZ-968M (1979)", "GAZ-3102 Volga (1982)",
+        
+        # Автомобили 90х годов
+        "VAZ-21099 (1990)", "Ford Escort (1990)", "Opel Astra F (1991)",
+        "BMW E36 (1990)", "Mercedes-Benz W202 (1993)", "Volkswagen Golf III (1991)",
+        "Audi A4 (1994)", "Toyota Corolla E100 (1991)", "Honda Civic (1991)",
+        
+        # Автомобили 2000х годов
+        "VAZ-2110 (1995)", "Ford Focus (1998)", "Opel Astra H (2004)",
+        "BMW E90 (2004)", "Mercedes-Benz W204 (2007)", "Volkswagen Golf V (2003)",
+        "Audi A4 B7 (2004)", "Toyota Camry (2006)", "Honda Accord (2002)",
+        
+        # Современные автомобили
+        "Lada Vesta (2015)", "Ford Focus IV (2018)", "Opel Astra J (2015)",
+        "BMW G20 (2018)", "Mercedes-Benz W205 (2014)", "Volkswagen Golf VIII (2019)",
+        "Audi A4 B9 (2015)", "Toyota Camry XV70 (2017)", "Honda Civic X (2015)",
+        
+        # Новейшие автомобили
+        "Lada Granta FL (2018)", "Ford Focus Active (2021)", "Opel Astra L (2021)",
+        "BMW 3 Series G20 LCI (2022)", "Mercedes-Benz C-Class W206 (2021)",
+        "Volkswagen Golf VIII GTI (2021)", "Audi A4 B9 FL (2019)", 
+        "Toyota Camry Facelift (2020)", "Honda Civic XI (2021)",
+        
+        # Премиум и спортивные
+        "Porsche 911 (2022)", "Tesla Model 3 (2023)", "BMW M3 (2023)",
+        "Mercedes-AMG C63 (2023)", "Audi RS6 (2023)", "Lexus IS (2023)"
+    ]
+    
+    # Выбор случайного автомобиля
+    car = random.choice(cars)
+    
+    await update.message.reply_text(
+        f"{user.first_name} 🚗 Твоя машина: {car}"
+    )
 
 # Обработчик кнопок
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2917,6 +3075,7 @@ async def confirm_schedule_broadcast(query, context):
         f"Рассылка будет отправлена всем пользователям и чатам.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    
 
 # Отправка расписания сейчас (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 async def send_schedule_broadcast_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3210,6 +3369,13 @@ def main():
     application.add_handler(CommandHandler("takevip", takevip_command))
     application.add_handler(CommandHandler("zakladka", zakladka_command))
     application.add_handler(CommandHandler("gangbang", gangbang_command))
+    application.add_handler(CommandHandler("chlen", chlen_command))
+    application.add_handler(CommandHandler("siski", siski_command)) 
+    application.add_handler(CommandHandler("seks", seks_command))
+    application.add_handler(CommandHandler("minet", minet_command))
+    application.add_handler(CommandHandler("kyni", kyni_command))
+    application.add_handler(CommandHandler("car", car_command))
+    application.add_handler(CommandHandler("drochka", drochka_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
     # Обработчик для всех сообщений от админов (включая медиа)
