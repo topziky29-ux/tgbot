@@ -1889,6 +1889,111 @@ async def siski_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{user.first_name} 🍒 Размер твоих сисек: {size}\n{comment}"
     )
+    # Обработчик ответов с действиями
+async def handle_action_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, что это групповой чат и есть reply
+    if (update.effective_chat.type not in ['group', 'supergroup'] or 
+        not update.message or 
+        not update.message.reply_to_message or
+        not update.message.text):
+        return
+    
+    user = update.effective_user
+    target_user = update.message.reply_to_message.from_user
+    message_text = update.message.text.lower().strip()
+    
+    # Проверяем слова и формируем ответ
+    response = None
+    
+    if message_text == "уебать":
+        response = f"@{user.username} уебал @{target_user.username}" if user.username and target_user.username else f"{user.first_name} уебал {target_user.first_name}"
+    
+    elif message_text == "выебать":
+        response = f"@{user.username} выебал @{target_user.username}" if user.username and target_user.username else f"{user.first_name} выебал {target_user.first_name}"
+        
+    elif message_text == "убить":
+        response = f"@{user.username} убил @{target_user.username}" if user.username and target_user.username else f"{user.first_name} убил {target_user.first_name}"
+    
+    elif message_text == "плюнуть":
+        response = f"@{user.username} плюнул в @{target_user.username}" if user.username and target_user.username else f"{user.first_name} плюнул в {target_user.first_name}"
+    
+    elif message_text == "минет":
+        response = f"@{user.username} заставил делать минет @{target_user.username}" if user.username and target_user.username else f"{user.first_name} заставил делать минет {target_user.first_name}"
+    
+    elif message_text == "куни":
+        # Определяем пол по имени (условно)
+        if user.first_name.endswith(('а', 'я', 'ь')):  # Женские окончания
+            response = f"@{user.username} заставила делать куни @{target_user.username}" if user.username and target_user.username else f"{user.first_name} заставила делать куни {target_user.first_name}"
+        else:
+            response = f"@{user.username} заставила делать куни @{target_user.username}" if user.username and target_user.username else f"{user.first_name} заставил делать куни {target_user.first_name}"
+    
+    # Отправляем ответ если есть совпадение
+    if response:
+        await update.message.reply_text(response)
+    
+    # Обработчик оскорблений в беседе
+async def handle_insults(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, что это групповой чат
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    if not update.message or not update.message.text:
+        return
+    
+    message_text = update.message.text.lower()
+    
+    # Обработчик оскорблений в беседе
+async def handle_insults(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, что это групповой чат
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    if not update.message or not update.message.text:
+        return
+    
+    message_text = update.message.text.lower()
+    
+# Обработчик оскорблений в беседе
+async def handle_insults(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    if not update.message or not update.message.text:
+        return
+    
+    message_text = update.message.text.lower()
+    
+    insults_triggers = [
+        "хуесос", "пидорас", "пидарас", "долбаёб", "долбаеб", "далбаёб", 
+        "далбаеб", "уебан", "шлюха", "шмара", "мразь", "мудила", "гандон",
+        "пошёл нахуй", "пошла нахуй", "соси", "соси член", "пидр", "еблан", "уебок"
+        
+        # Без матов, но оскорбительные
+        "идиот", "дебил", "даун", "дурак", "тупиц", "кретин", "олень", 
+        "козел", "осел", "чмо", "лох", "лошар", "додик", "придурок", 
+        "недоделанный", "недоумок", "тупой", "тупая", "мозг", "отсталый",
+        "урод", "скотин", "свинь", "животное", "тварь", "гадин", "падл",
+        "ублюдок", "выродок", "недолюдок", "недочеловек"
+    ]
+    
+    found_insult = False
+    for trigger in insults_triggers:
+        if trigger in message_text:
+            found_insult = True
+            break
+    
+    if found_insult:
+        try:
+            # ЗАМЕНИТЕ НА ВАШ file_id
+            video_file_id = "BAACAgIAAxkBAAIBiWkY5fJPBxTgGR1mBr__GwUHmv9SAAK8kwACc9TISB-7ziQ4S58_NgQ"  # ваш file_id
+            
+            await update.message.reply_video(video=video_file_id)
+                    
+        except Exception as e:
+            logger.error(f"Ошибка отправки видео: {e}")
+            
+       
+        
 # Команда /seks - предсказание даты
 async def seks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -3362,6 +3467,8 @@ def main():
     application.add_handler(CommandHandler("game", game_command))
     application.add_handler(CommandHandler("givemoney", give_money_command))
     
+   
+    
     # Существующие команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("group", group_command))
@@ -3378,6 +3485,18 @@ def main():
     application.add_handler(CommandHandler("drochka", drochka_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
+    # Обработчик ответов с действиями
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.REPLY & filters.ChatType.GROUPS,
+        handle_action_replies
+    ))
+    
+    application.add_handler(MessageHandler(
+    filters.TEXT & filters.ChatType.GROUPS,
+    handle_insults
+    ))
+    
+    application.add_handler(CallbackQueryHandler(button_handler))
     # Обработчик для всех сообщений от админов (включая медиа)
     application.add_handler(MessageHandler(
         filters.TEXT | filters.PHOTO | filters.VIDEO, 
