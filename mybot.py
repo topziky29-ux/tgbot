@@ -351,10 +351,41 @@ def has_vip_status(user_id):
         logger.error(f"Ошибка при проверке VIP статуса для {user_id}: {e}")
         return False
 
+  
 # Инициализация базы данных
 def init_db():
     conn = sqlite3.connect('university_bot.db', check_same_thread=False)
     cursor = conn.cursor()
+    
+        # Создаем таблицу для браков
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS marriages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user1_id INTEGER NOT NULL,
+            user2_id INTEGER NOT NULL,
+            user1_username TEXT,
+            user2_username TEXT,
+            chat_id INTEGER NOT NULL,
+            married_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT TRUE,
+            last_seks_date TEXT,
+            UNIQUE(user1_id, user2_id, chat_id)
+        )
+    ''')
+    
+    # Создаем таблицу для предложений брака
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS marriage_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proposer_id INTEGER NOT NULL,
+            target_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    ''')
+
     
     # Создаем таблицу users с правильными колонками
     cursor.execute('''
@@ -433,6 +464,12 @@ def init_db():
     if 'is_vip' not in columns:
         cursor.execute('ALTER TABLE chats ADD COLUMN is_vip BOOLEAN DEFAULT FALSE')
         logger.info("Добавлена колонка is_vip в таблицу chats")
+        
+        # Создаем индекс для улучшения производительности
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_marriages_chat ON marriages(chat_id, is_active)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_marriages_users ON marriages(user1_id, user2_id, is_active)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_proposals_created ON marriage_proposals(created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_proposals_active ON marriage_proposals(is_active)')
     
     # Проверяем и добавляем отсутствующие колонки в таблицу admin_logs
     cursor.execute("PRAGMA table_info(admin_logs)")
@@ -575,6 +612,93 @@ def get_vip_users_by_group(group_name):
         logger.error(f"Ошибка при получении VIP пользователей группы {group_name}: {e}")
         return []
 
+# Функции для работы с предложениями брака
+def create_marriage_proposal(proposer_id, target_id, chat_id, message_id):
+    """Создать предложение о браке"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Деактивируем старые предложения между этими пользователями
+        cursor.execute('''
+            UPDATE marriage_proposals 
+            SET is_active = FALSE 
+            WHERE proposer_id = ? AND target_id = ? AND chat_id = ?
+        ''', (proposer_id, target_id, chat_id))
+        
+        # Создаем новое предложение
+        cursor.execute('''
+            INSERT INTO marriage_proposals (proposer_id, target_id, chat_id, message_id)
+            VALUES (?, ?, ?, ?)
+        ''', (proposer_id, target_id, chat_id, message_id))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Предложение брака создано: {proposer_id} -> {target_id} в чате {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при создании предложения брака: {e}")
+        return False
+
+def deactivate_marriage_proposal(proposal_id):
+    """Деактивировать предложение о браке"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE marriage_proposals 
+            SET is_active = FALSE 
+            WHERE id = ?
+        ''', (proposal_id,))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Предложение брака деактивировано: {proposal_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при деактивации предложения брака: {e}")
+        return False
+
+def get_active_proposal(proposer_id, target_id, chat_id):
+    """Получить активное предложение между пользователями"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM marriage_proposals 
+            WHERE proposer_id = ? AND target_id = ? AND chat_id = ? AND is_active = TRUE
+        ''', (proposer_id, target_id, chat_id))
+        
+        proposal = cursor.fetchone()
+        conn.close()
+        return proposal
+    except Exception as e:
+        logger.error(f"Ошибка при получении предложения брака: {e}")
+        return None
+
+def get_old_proposals(minutes=20):
+    """Получить устаревшие предложения"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Вычисляем время, до которого предложения считаются активными
+        time_threshold = datetime.now() - timedelta(minutes=minutes)
+        
+        cursor.execute('''
+            SELECT * FROM marriage_proposals 
+            WHERE is_active = TRUE AND created_at < ?
+        ''', (time_threshold,))
+        
+        old_proposals = cursor.fetchall()
+        conn.close()
+        return old_proposals
+    except Exception as e:
+        logger.error(f"Ошибка при получении устаревших предложений: {e}")
+        return []
+        
 # Получение всех пользователей
 def get_all_users():
     try:
@@ -1902,6 +2026,166 @@ async def handle_action_replies(update: Update, context: ContextTypes.DEFAULT_TY
     target_user = update.message.reply_to_message.from_user
     message_text = update.message.text.lower().strip()
     
+async def handle_marriage_proposal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик предложения пожениться (ответ на сообщение ИЛИ прямое сообщение)"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    user = update.effective_user
+    message_text = update.message.text.strip().lower()
+    
+    # Если это прямое сообщение "пожениться" (не reply), объясняем как использовать
+    if not update.message.reply_to_message:
+        if message_text in ['пожениться', 'поженится']:
+            await update.message.reply_text(
+                "💍 Чтобы предложить брак, ответьте командой 'Пожениться' на сообщение пользователя.\n\n"
+                "Пример использования:\n"
+                "1. Нажмите на сообщение пользователя\n"
+                "2. Выберите 'Ответить'\n" 
+                "3. Напишите 'Пожениться'\n"
+                "4. Отправьте сообщение"
+            )
+        return
+    
+    # Проверяем, что это предложение пожениться (в reply)
+    if message_text not in ['пожениться', 'поженится']:
+        return
+    
+    target_user = update.message.reply_to_message.from_user
+    
+    # Нельзя предложить брак самому себе
+    if user.id == target_user.id:
+        await update.message.reply_text("❌ Нельзя предложить брак самому себе!")
+        return
+    
+    # Проверяем, не состоит ли пользователь уже в браке
+    existing_marriage = get_marriage(user.id, update.effective_chat.id)
+    if existing_marriage:
+        await update.message.reply_text("❌ Вы уже состоите в браке в этой беседе!")
+        return
+    
+    # Проверяем, не состоит ли целевой пользователь уже в браке
+    target_existing_marriage = get_marriage(target_user.id, update.effective_chat.id)
+    if target_existing_marriage:
+        await update.message.reply_text("❌ Этот пользователь уже состоит в браке в этой беседе!")
+        return
+    
+    # Создаем клавиатуру с кнопками ответа
+    keyboard = [
+        [
+            InlineKeyboardButton("💍 Я согласна", callback_data=f"marriage_accept_{user.id}"),
+            InlineKeyboardButton("🚫 Нет, Сиди дрочи", callback_data=f"marriage_reject_{user.id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Формируем текст предложения
+    user_mention = f"@{user.username}" if user.username else user.first_name
+    target_mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+    
+    proposal_text = (
+        f"💍 {user_mention} предлагает {target_mention} вступить в брак!\n\n"
+        f"Что выберете?\n\n"
+        f"⏰ Предложение действительно 20 минут!"
+    )
+    
+    # Отправляем сообщение с предложением
+    proposal_message = await update.message.reply_text(proposal_text, reply_markup=reply_markup)
+    
+    # Сохраняем предложение в базу данных
+    create_marriage_proposal(
+        user.id, 
+        target_user.id, 
+        update.effective_chat.id,
+        proposal_message.message_id
+    )
+    
+    # Обработчик расторжения брака
+async def handle_breakup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик расторжения брака (ответ на сообщение)"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    if not update.message or not update.message.reply_to_message:
+        return
+    
+    user = update.effective_user
+    target_user = update.message.reply_to_message.from_user
+    message_text = update.message.text.strip().lower()
+    
+    # Проверяем, что это предложение расстаться
+    if message_text not in ['расстаться', 'расстатся']:
+        return
+    
+    # Проверяем, состоят ли пользователи в браке
+    marriage = get_marriage(user.id, update.effective_chat.id)
+    if not marriage:
+        await update.message.reply_text("❌ Вы не состоите в браке в этой беседе!")
+        return
+    
+    # Проверяем, что пользователь отвечает на сообщение своего партнера по браку
+    marriage_user1 = marriage[1]  # user1_id
+    marriage_user2 = marriage[2]  # user2_id
+    
+    if target_user.id not in [marriage_user1, marriage_user2]:
+        await update.message.reply_text("❌ Вы можете расстаться только со своим партнером по браку!")
+        return
+    
+    # Расторгаем брак
+    success, message = break_marriage(user.id, target_user.id, update.effective_chat.id)
+    
+    if success:
+        user_mention = f"@{user.username}" if user.username else user.first_name
+        target_mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+        
+        breakup_text = f"💔 {user_mention} и {target_mention} расторгли свой брак!"
+        await update.message.reply_text(breakup_text)
+    else:
+        await update.message.reply_text(f"❌ {message}")
+        
+        # Команда для просмотра браков в беседе
+async def braki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать все браки в беседе"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ Эта команда работает только в групповых чатах!")
+        return
+   
+    chat_id = update.effective_chat.id
+    marriages = get_chat_marriages(chat_id)
+    
+    if not marriages:
+        await update.message.reply_text("💔 В этой беседе пока нет браков.")
+        return
+    
+    marriages_text = "💑 Браки в этой беседе:\n\n"
+    
+    for marriage in marriages:
+        user1_username = marriage[3] or "Пользователь"
+        user2_username = marriage[4] or "Пользователь"
+        married_date = datetime.strptime(marriage[6], '%Y-%m-%d %H:%M:%S')
+        
+        # Вычисляем сколько времени вместе
+        time_together = datetime.now() - married_date
+        days_together = time_together.days
+        months_together = days_together // 30
+        years_together = months_together // 12
+        
+        time_text = ""
+        if years_together > 0:
+            time_text = f"{years_together} год(а/лет) и {months_together % 12} месяц(ев)"
+        elif months_together > 0:
+            time_text = f"{months_together} месяц(ев) и {days_together % 30} день(дней)"
+        else:
+            time_text = f"{days_together} день(дней)"
+        
+        marriages_text += (
+            f"💞 {user1_username} ❤️ {user2_username}\n"
+            f"📅 Вместе: {time_text}\n"
+            f"💒 С: {married_date.strftime('%d.%m.%Y')}\n\n"
+        )
+    
+    await update.message.reply_text(marriages_text)
+    
     # Проверяем слова и формируем ответ
     response = None
     
@@ -2020,7 +2304,749 @@ async def seks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{user.first_name} 💘 У тебя будет секс:\n📅 {date_str} в {time_str}"
     )
+    
+    # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С БРАКАМИ ====================
 
+def create_marriage(user1_id, user1_username, user2_id, user2_username, chat_id):
+    """Создать брак"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Проверяем, не состоят ли уже пользователи в браке в этом чате
+        cursor.execute('''
+            SELECT * FROM marriages 
+            WHERE chat_id = ? AND is_active = TRUE 
+            AND ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
+        ''', (chat_id, user1_id, user2_id, user2_id, user1_id))
+        
+        existing_marriage = cursor.fetchone()
+        if existing_marriage:
+            conn.close()
+            return False, "Эти пользователи уже состоят в браке!"
+        
+        # Создаем брак
+        cursor.execute('''
+            INSERT INTO marriages (user1_id, user2_id, user1_username, user2_username, chat_id)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user1_id, user2_id, user1_username, user2_username, chat_id))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Брак создан: {user1_id} и {user2_id} в чате {chat_id}")
+        return True, "Брак успешно создан!"
+    except Exception as e:
+        logger.error(f"Ошибка при создании брака: {e}")
+        return False, "Ошибка при создании брака"
+
+def break_marriage(user1_id, user2_id, chat_id):
+    """Расторгнуть брак"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE marriages 
+            SET is_active = FALSE 
+            WHERE chat_id = ? AND is_active = TRUE 
+            AND ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
+        ''', (chat_id, user1_id, user2_id, user2_id, user1_id))
+        
+        rows_affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        if rows_affected > 0:
+            logger.info(f"Брак расторгнут: {user1_id} и {user2_id} в чате {chat_id}")
+            return True, "Брак расторгнут!"
+        else:
+            return False, "Брак не найден!"
+    except Exception as e:
+        logger.error(f"Ошибка при расторжении брака: {e}")
+        return False, "Ошибка при расторжении брака"
+
+def get_marriage(user_id, chat_id):
+    """Получить информацию о браке пользователя в чате"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM marriages 
+            WHERE chat_id = ? AND is_active = TRUE 
+            AND (user1_id = ? OR user2_id = ?)
+        ''', (chat_id, user_id, user_id))
+        
+        marriage = cursor.fetchone()
+        conn.close()
+        return marriage
+    except Exception as e:
+        logger.error(f"Ошибка при получении брака: {e}")
+        return None
+
+def get_chat_marriages(chat_id):
+    """Получить все активные браки в чате"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM marriages 
+            WHERE chat_id = ? AND is_active = TRUE 
+            ORDER BY married_date DESC
+        ''', (chat_id,))
+        
+        marriages = cursor.fetchall()
+        conn.close()
+        return marriages
+    except Exception as e:
+        logger.error(f"Ошибка при получении браков чата: {e}")
+        return []
+
+def set_last_seks_date(marriage_id, date_str):
+    """Установить дату последнего секса для брака"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE marriages 
+            SET last_seks_date = ? 
+            WHERE id = ?
+        ''', (date_str, marriage_id))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при установке даты секса: {e}")
+        return False
+
+def get_last_seks_date(marriage_id):
+    """Получить дату последнего секса для брака"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT last_seks_date FROM marriages WHERE id = ?', (marriage_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Ошибка при получении даты секса: {e}")
+        return None
+
+# ==================== ФУНКЦИИ ДЛЯ ПРЕДЛОЖЕНИЙ БРАКА ====================
+
+def create_marriage_proposal(proposer_id, target_id, chat_id, message_id):
+    """Создать предложение о браке"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Деактивируем старые предложения между этими пользователями
+        cursor.execute('''
+            UPDATE marriage_proposals 
+            SET is_active = FALSE 
+            WHERE proposer_id = ? AND target_id = ? AND chat_id = ?
+        ''', (proposer_id, target_id, chat_id))
+        
+        # Создаем новое предложение
+        cursor.execute('''
+            INSERT INTO marriage_proposals (proposer_id, target_id, chat_id, message_id)
+            VALUES (?, ?, ?, ?)
+        ''', (proposer_id, target_id, chat_id, message_id))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Предложение брака создано: {proposer_id} -> {target_id} в чате {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при создании предложения брака: {e}")
+        return False
+
+def deactivate_marriage_proposal(proposal_id):
+    """Деактивировать предложение о браке"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE marriage_proposals 
+            SET is_active = FALSE 
+            WHERE id = ?
+        ''', (proposal_id,))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Предложение брака деактивировано: {proposal_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при деактивации предложения брака: {e}")
+        return False
+
+def get_active_proposal(proposer_id, target_id, chat_id):
+    """Получить активное предложение между пользователями"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM marriage_proposals 
+            WHERE proposer_id = ? AND target_id = ? AND chat_id = ? AND is_active = TRUE
+        ''', (proposer_id, target_id, chat_id))
+        
+        proposal = cursor.fetchone()
+        conn.close()
+        return proposal
+    except Exception as e:
+        logger.error(f"Ошибка при получении предложения брака: {e}")
+        return None
+
+def get_user_active_proposals(user_id, chat_id):
+    """Получить активные предложения пользователя в чате"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM marriage_proposals 
+            WHERE proposer_id = ? AND chat_id = ? AND is_active = TRUE
+        ''', (user_id, chat_id))
+        
+        proposals = cursor.fetchall()
+        conn.close()
+        return proposals
+    except Exception as e:
+        logger.error(f"Ошибка при получении активных предложений пользователя: {e}")
+        return []
+
+def get_old_proposals(minutes=20):
+    """Получить устаревшие предложения"""
+    try:
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Вычисляем время, до которого предложения считаются активными
+        time_threshold = datetime.now() - timedelta(minutes=minutes)
+        
+        cursor.execute('''
+            SELECT * FROM marriage_proposals 
+            WHERE is_active = TRUE AND created_at < ?
+        ''', (time_threshold,))
+        
+        old_proposals = cursor.fetchall()
+        conn.close()
+        return old_proposals
+    except Exception as e:
+        logger.error(f"Ошибка при получении устаревших предложений: {e}")
+        return []
+
+# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
+
+# Обработчик предложения пожениться
+async def handle_marriage_proposal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик предложения пожениться (ответ на сообщение)"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    if not update.message or not update.message.reply_to_message:
+        return
+    
+    user = update.effective_user
+    target_user = update.message.reply_to_message.from_user
+    message_text = update.message.text.strip().lower()
+    
+    # Проверяем, что это предложение пожениться
+    if message_text not in ['пожениться', 'поженится']:
+        return
+    
+    # Нельзя предложить брак самому себе
+    if user.id == target_user.id:
+        await update.message.reply_text("❌ Нельзя предложить брак самому себе!")
+        return
+    
+    # Проверяем, не состоит ли пользователь уже в браке
+    existing_marriage = get_marriage(user.id, update.effective_chat.id)
+    if existing_marriage:
+        await update.message.reply_text("❌ Вы уже состоите в браке в этой беседе!")
+        return
+    
+    # Проверяем, не состоит ли целевой пользователь уже в браке
+    target_existing_marriage = get_marriage(target_user.id, update.effective_chat.id)
+    if target_existing_marriage:
+        await update.message.reply_text("❌ Этот пользователь уже состоит в браке в этой беседе!")
+        return
+    
+    # Создаем клавиатуру с кнопками ответа
+    keyboard = [
+        [
+            InlineKeyboardButton("💍 Я согласна", callback_data=f"marriage_accept_{user.id}"),
+            InlineKeyboardButton("🚫 Нет, Сиди дрочи", callback_data=f"marriage_reject_{user.id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Формируем текст предложения
+    user_mention = f"@{user.username}" if user.username else user.first_name
+    target_mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+    
+    proposal_text = (
+        f"💍 {user_mention} предлагает {target_mention} вступить в брак!\n\n"
+        f"Что выберете?\n\n"
+        f"⏰ Предложение действительно 20 минут!"
+    )
+    
+    # Отправляем сообщение с предложением
+    proposal_message = await update.message.reply_text(proposal_text, reply_markup=reply_markup)
+    
+    # Сохраняем предложение в базу данных
+    create_marriage_proposal(
+        user.id, 
+        target_user.id, 
+        update.effective_chat.id,
+        proposal_message.message_id
+    )
+
+# Обработчик расторжения брака
+async def handle_breakup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик расторжения брака (ответ на сообщение)"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        return
+    
+    if not update.message or not update.message.reply_to_message:
+        return
+    
+    user = update.effective_user
+    target_user = update.message.reply_to_message.from_user
+    message_text = update.message.text.strip().lower()
+    
+    # Проверяем, что это предложение расстаться
+    if message_text not in ['расстаться', 'расстатся']:
+        return
+    
+    # Проверяем, состоят ли пользователи в браке
+    marriage = get_marriage(user.id, update.effective_chat.id)
+    if not marriage:
+        await update.message.reply_text("❌ Вы не состоите в браке в этой беседе!")
+        return
+    
+    # Проверяем, что пользователь отвечает на сообщение своего партнера по браку
+    marriage_user1 = marriage[1]  # user1_id
+    marriage_user2 = marriage[2]  # user2_id
+    
+    if target_user.id not in [marriage_user1, marriage_user2]:
+        await update.message.reply_text("❌ Вы можете расстаться только со своим партнером по браку!")
+        return
+    
+    # Расторгаем брак
+    success, message = break_marriage(user.id, target_user.id, update.effective_chat.id)
+    
+    if success:
+        user_mention = f"@{user.username}" if user.username else user.first_name
+        target_mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+        
+        breakup_text = f"💔 {user_mention} и {target_mention} расторгли свой брак!"
+        await update.message.reply_text(breakup_text)
+    else:
+        await update.message.reply_text(f"❌ {message}")
+
+# Команда для просмотра браков в беседе
+async def braki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать все браки в беседе"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ Эта команда работает только в групповых чатах!")
+        return
+    
+    chat_id = update.effective_chat.id
+    marriages = get_chat_marriages(chat_id)
+    
+    if not marriages:
+        await update.message.reply_text("💔 В этой беседе пока нет браков.")
+        return
+    
+    marriages_text = "💑 Браки в этой беседе:\n\n"
+    
+    for marriage in marriages:
+        user1_username = marriage[3] or "Пользователь"
+        user2_username = marriage[4] or "Пользователь"
+        married_date = datetime.strptime(marriage[6], '%Y-%m-%d %H:%M:%S')
+        
+        # Вычисляем сколько времени вместе
+        time_together = datetime.now() - married_date
+        days_together = time_together.days
+        months_together = days_together // 30
+        years_together = months_together // 12
+        
+        time_text = ""
+        if years_together > 0:
+            time_text = f"{years_together} год(а/лет) и {months_together % 12} месяц(ев)"
+        elif months_together > 0:
+            time_text = f"{months_together} месяц(ев) и {days_together % 30} день(дней)"
+        else:
+            time_text = f"{days_together} день(дней)"
+        
+        marriages_text += (
+            f"💞 {user1_username} ❤️ {user2_username}\n"
+            f"📅 Вместе: {time_text}\n"
+            f"💒 С: {married_date.strftime('%d.%m.%Y')}\n\n"
+        )
+    
+    await update.message.reply_text(marriages_text)
+
+# Команда для отмены своего предложения о браке
+async def otkaz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменить свое предложение о браке"""
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ Эта команда работает только в групповых чатах!")
+        return
+    
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    
+    # Получаем активные предложения пользователя
+    active_proposals = get_user_active_proposals(user.id, chat_id)
+    
+    if not active_proposals:
+        await update.message.reply_text(
+            "❌ У вас нет активных предложений о браке в этой беседе.\n\n"
+            "Чтобы создать предложение, ответьте на сообщение пользователя текстом \"Пожениться\""
+        )
+        return
+    
+    # Если есть только одно предложение, отменяем его сразу
+    if len(active_proposals) == 1:
+        proposal = active_proposals[0]
+        await cancel_single_proposal(update, context, proposal)
+        return
+    
+    # Если несколько предложений, показываем выбор
+    await show_proposals_selection(update, context, active_proposals)
+
+async def cancel_single_proposal(update: Update, context: ContextTypes.DEFAULT_TYPE, proposal):
+    """Отменить одно предложение"""
+    proposal_id, proposer_id, target_id, chat_id, message_id, created_at, is_active = proposal
+    
+    try:
+        # Получаем информацию о целевом пользователе
+        target_user = await context.bot.get_chat(target_id)
+        target_mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+        
+        # Деактивируем предложение в БД
+        deactivate_marriage_proposal(proposal_id)
+        
+        # Обновляем сообщение с предложением
+        cancellation_text = (
+            f"💔 Предложение о браке отменено!\n\n"
+            f"👤 {target_mention}, предложение было отозвано пользователем."
+        )
+        
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=cancellation_text
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось обновить сообщение предложения: {e}")
+        
+        # Отправляем подтверждение
+        await update.message.reply_text(
+            f"✅ Вы отменили предложение о браке пользователю {target_mention}"
+        )
+        
+        logger.info(f"Предложение отменено пользователем: {proposal_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отмене предложения: {e}")
+        await update.message.reply_text("❌ Ошибка при отмене предложения!")
+
+async def show_proposals_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, proposals):
+    """Показать выбор предложений для отмены"""
+    keyboard = []
+    
+    for proposal in proposals:
+        proposal_id, proposer_id, target_id, chat_id, message_id, created_at, is_active = proposal
+        
+        try:
+            target_user = await context.bot.get_chat(target_id)
+            target_name = f"@{target_user.username}" if target_user.username else target_user.first_name
+            
+            # Форматируем время создания
+            created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+            time_passed = datetime.now() - created_time
+            minutes_passed = int(time_passed.total_seconds() / 60)
+            
+            button_text = f"❌ {target_name} ({minutes_passed} мин. назад)"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"cancel_proposal_{proposal_id}")])
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении информации о пользователе {target_id}: {e}")
+            continue
+    
+    keyboard.append([InlineKeyboardButton("🔙 Отмена", callback_data="cancel_selection")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "💔 У вас несколько активных предложений:\n\n"
+        "Выберите предложение для отмены:",
+        reply_markup=reply_markup
+    )
+
+# Обновленная команда /seks для пар
+async def seks_command_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /seks для пар (обновленная версия)"""
+    user = update.effective_user
+    
+    # Проверяем, состоит ли пользователь в браке (если это групповая беседа)
+    if update.effective_chat.type in ['group', 'supergroup']:
+        marriage = get_marriage(user.id, update.effective_chat.id)
+        
+        if marriage:
+            # Пользователь в браке - используем общую дату для пары
+            marriage_id = marriage[0]
+            last_seks_date = get_last_seks_date(marriage_id)
+            
+            if last_seks_date:
+                # Если дата уже установлена, показываем ее
+                await update.message.reply_text(
+                    f"💑 {user.first_name}, у вас с партнером уже был секс!\n"
+                    f"📅 Дата: {last_seks_date}"
+                )
+                return
+            
+            # Генерируем новую дату для пары
+            start_date = datetime(2025, 11, 15)
+            end_date = datetime(2026, 11, 15)
+            delta = end_date - start_date
+            random_days = random.randint(0, delta.days)
+            random_date = start_date + timedelta(days=random_days)
+            random_hour = random.randint(18, 23)
+            random_minute = random.randint(0, 59)
+            
+            date_str = random_date.strftime("%d.%m.%Y")
+            time_str = f"{random_hour:02d}:{random_minute:02d}"
+            full_date_str = f"{date_str} в {time_str}"
+            
+            # Сохраняем дату для брака
+            set_last_seks_date(marriage_id, full_date_str)
+            
+            # Получаем информацию о партнере
+            partner_id = marriage[2] if marriage[1] == user.id else marriage[1]
+            partner_username = marriage[4] if marriage[1] == user.id else marriage[3]
+            partner_display = f"@{partner_username}" if partner_username else "ваш партнер"
+            
+            await update.message.reply_text(
+                f"💑 {user.first_name} и {partner_display} 💘\n"
+                f"У вас будет совместный секс:\n"
+                f"📅 {full_date_str}\n\n"
+                f"*Эта дата общая для вас и вашего партнера!"
+            )
+            return
+    
+    # Если пользователь не в браке или это личные сообщения - используем старую логику
+    start_date = datetime(2025, 11, 15)
+    end_date = datetime(2026, 11, 15)
+    delta = end_date - start_date
+    random_days = random.randint(0, delta.days)
+    random_date = start_date + timedelta(days=random_days)
+    random_hour = random.randint(18, 23)
+    random_minute = random.randint(0, 59)
+    
+    date_str = random_date.strftime("%d.%m.%Y")
+    time_str = f"{random_hour:02d}:{random_minute:02d}"
+    
+    await update.message.reply_text(
+        f"{user.first_name} 💘 У тебя будет секс:\n📅 {date_str} в {time_str}"
+    )
+
+# ==================== ОБРАБОТЧИКИ КНОПОК БРАКА ====================
+
+# Обработчик принятия брака
+async def handle_marriage_accept(query, context):
+    """Обработчик принятия предложения о браке"""
+    user = query.from_user
+    proposer_id = int(query.data.split('_')[2])
+    
+    # Проверяем, что предложение еще активно
+    active_proposal = get_active_proposal(proposer_id, user.id, query.message.chat.id)
+    if not active_proposal:
+        await query.edit_message_text("❌ Это предложение устарело или было отозвано!")
+        return
+    
+    # Проверяем, что пользователь еще не в браке
+    existing_marriage = get_marriage(user.id, query.message.chat.id)
+    if existing_marriage:
+        await query.edit_message_text("❌ Вы уже состоите в браке в этой беседе!")
+        # Деактивируем предложение
+        deactivate_marriage_proposal(active_proposal[0])
+        return
+    
+    # Создаем брак
+    user_username = user.username or user.first_name
+    proposer = await context.bot.get_chat(proposer_id)
+    proposer_username = proposer.username or proposer.first_name
+    
+    success, message = create_marriage(
+        proposer_id, proposer_username,
+        user.id, user_username,
+        query.message.chat.id
+    )
+    
+    if success:
+        # Деактивируем предложение
+        deactivate_marriage_proposal(active_proposal[0])
+        
+        marriage_text = (
+            f"🎉 Поздравляем! 💒\n\n"
+            f"💑 {proposer_username} и {user_username} теперь муж и жена!\n"
+            f"📅 Дата бракосочетания: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"Желаем счастливой семейной жизни! ❤️"
+        )
+        await query.edit_message_text(marriage_text)
+    else:
+        await query.edit_message_text(f"❌ {message}")
+
+# Обработчик отклонения брака
+async def handle_marriage_reject(query, context):
+    """Обработчик отклонения предложения о браке"""
+    user = query.from_user
+    proposer_id = int(query.data.split('_')[2])
+    
+    # Проверяем, что предложение еще активно
+    active_proposal = get_active_proposal(proposer_id, user.id, query.message.chat.id)
+    if not active_proposal:
+        await query.edit_message_text("❌ Это предложение устарело или было отозвано!")
+        return
+    
+    # Деактивируем предложение
+    deactivate_marriage_proposal(active_proposal[0])
+    
+    proposer = await context.bot.get_chat(proposer_id)
+    proposer_mention = f"@{proposer.username}" if proposer.username else proposer.first_name
+    user_mention = f"@{user.username}" if user.username else user.first_name
+    
+    rejection_text = (
+        f"💔 {user_mention} отказал(а) {proposer_mention} в браке!\n\n"
+        f"🚫 Нет, Сиди дрочи"
+    )
+    
+    await query.edit_message_text(rejection_text)
+
+# Обработчик отмены конкретного предложения
+async def handle_cancel_proposal(query, context):
+    """Обработчик отмены конкретного предложения"""
+    user = query.from_user
+    proposal_id = int(query.data.split('_')[2])
+    
+    try:
+        # Получаем информацию о предложении
+        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM marriage_proposals WHERE id = ?', (proposal_id,))
+        proposal = cursor.fetchone()
+        conn.close()
+        
+        if not proposal:
+            await query.edit_message_text("❌ Предложение не найдено!")
+            return
+        
+        proposal_id, proposer_id, target_id, chat_id, message_id, created_at, is_active = proposal
+        
+        # Проверяем, что пользователь является создателем предложения
+        if proposer_id != user.id:
+            await query.edit_message_text("❌ Вы можете отменять только свои предложения!")
+            return
+        
+        # Отменяем предложение
+        await cancel_proposal_by_id(query, context, proposal)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отмене предложения: {e}")
+        await query.edit_message_text("❌ Ошибка при отмене предложения!")
+
+async def cancel_proposal_by_id(query, context, proposal):
+    """Отменить предложение по ID"""
+    proposal_id, proposer_id, target_id, chat_id, message_id, created_at, is_active = proposal
+    
+    try:
+        # Получаем информацию о целевом пользователе
+        target_user = await context.bot.get_chat(target_id)
+        target_mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+        
+        # Деактивируем предложение в БД
+        deactivate_marriage_proposal(proposal_id)
+        
+        # Обновляем сообщение с предложением
+        cancellation_text = (
+            f"💔 Предложение о браке отменено!\n\n"
+            f"👤 {target_mention}, предложение было отозвано пользователем."
+        )
+        
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=cancellation_text
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось обновить сообщение предложения: {e}")
+        
+        # Обновляем сообщение с выбором
+        await query.edit_message_text(
+            f"✅ Вы отменили предложение о браке пользователю {target_mention}"
+        )
+        
+        logger.info(f"Предложение отменено через выбор: {proposal_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отмене предложения по ID: {e}")
+        await query.edit_message_text("❌ Ошибка при отмене предложения!")
+
+# Обработчик отмены выбора
+async def handle_cancel_selection(query):
+    """Обработчик отмены выбора предложения"""
+    await query.edit_message_text("✅ Выбор отменен.")
+
+# ==================== АВТОМАТИЧЕСКАЯ ОЧИСТКА ====================
+
+# Функция для автоматической очистки устаревших предложений
+async def cleanup_old_proposals(context: ContextTypes.DEFAULT_TYPE):
+    """Очистка устаревших предложений о браке"""
+    try:
+        old_proposals = get_old_proposals(20)  # 20 минут
+        
+        for proposal in old_proposals:
+            proposal_id, proposer_id, target_id, chat_id, message_id, created_at, is_active = proposal
+            
+            try:
+                # Пытаемся обновить сообщение
+                deactivation_text = (
+                    f"💔 Предложение о браке устарело!\n\n"
+                    f"⏰ Время на ответ истекло (20 минут)."
+                )
+                
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=deactivation_text
+                )
+                
+                # Деактивируем предложение в базе данных
+                deactivate_marriage_proposal(proposal_id)
+                
+                logger.info(f"Устаревшее предложение деактивировано: {proposal_id}")
+                
+            except Exception as e:
+                # Если не удалось обновить сообщение (удалено и т.д.), просто деактивируем в БД
+                deactivate_marriage_proposal(proposal_id)
+                logger.info(f"Предложение деактивировано (сообщение недоступно): {proposal_id}")
+                
+    except Exception as e:
+        logger.error(f"Ошибка при очистке устаревших предложений: {e}")
+    
+   
 # Команда /drochka - статистика
 async def drochka_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -2167,6 +3193,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await select_roulette_bet(query, context)
         elif query.data.startswith("roulette_") and any(x in query.data for x in ["red", "black", "zero", "1-12", "13-24", "25-36"]):
             await play_roulette(query, context)
+        
+        # Обработка кнопок брака
+        elif query.data.startswith("marriage_accept_"):
+            await handle_marriage_accept(query, context)
+        elif query.data.startswith("marriage_reject_"):
+            await handle_marriage_reject(query, context)
+        elif query.data.startswith("cancel_proposal_"):
+            await handle_cancel_proposal(query, context)
+        elif query.data == "cancel_selection":
+            await handle_cancel_selection(query)
         
         # Обработка остальных кнопок
         elif query.data == "select_group":
@@ -3459,15 +4495,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     # Добавляем более детальное логирование для отладки
     logging.getLogger('httpx').setLevel(logging.WARNING)
-    
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем новые команды
     application.add_handler(CommandHandler("game", game_command))
     application.add_handler(CommandHandler("givemoney", give_money_command))
-    
-   
     
     # Существующие команды
     application.add_handler(CommandHandler("start", start))
@@ -3478,12 +4511,20 @@ def main():
     application.add_handler(CommandHandler("gangbang", gangbang_command))
     application.add_handler(CommandHandler("chlen", chlen_command))
     application.add_handler(CommandHandler("siski", siski_command)) 
-    application.add_handler(CommandHandler("seks", seks_command))
+    application.add_handler(CommandHandler("seks", seks_command_updated))
     application.add_handler(CommandHandler("minet", minet_command))
     application.add_handler(CommandHandler("kyni", kyni_command))
     application.add_handler(CommandHandler("car", car_command))
     application.add_handler(CommandHandler("drochka", drochka_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CommandHandler("braki", braki_command))
+    application.add_handler(CommandHandler("otkaz", otkaz_command))
+    
+    # Обработчик для команды "пожениться" (ответ на сообщение И обычные сообщения)
+    application.add_handler(MessageHandler(
+        (filters.TEXT & filters.REPLY & filters.ChatType.GROUPS) | 
+        (filters.TEXT & filters.ChatType.GROUPS & filters.Regex(r'(?i)^(пожениться|поженится)$')),
+        handle_marriage_proposal
+    ))
     
     # Обработчик ответов с действиями
     application.add_handler(MessageHandler(
@@ -3491,18 +4532,25 @@ def main():
         handle_action_replies
     ))
     
+    # Обработчик оскорблений
     application.add_handler(MessageHandler(
-    filters.TEXT & filters.ChatType.GROUPS,
-    handle_insults
+        filters.TEXT & filters.ChatType.GROUPS,
+        handle_insults
     ))
     
-    application.add_handler(CallbackQueryHandler(button_handler))
+    # Обработчик расторжения брака (ответ на сообщение)
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.REPLY & filters.ChatType.GROUPS,
+        handle_breakup
+    ))
+    
     # Обработчик для всех сообщений от админов (включая медиа)
     application.add_handler(MessageHandler(
         filters.TEXT | filters.PHOTO | filters.VIDEO, 
         handle_admin_messages
     ))
     
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
     application.add_error_handler(error_handler)
     
@@ -3514,6 +4562,9 @@ def main():
             time=datetime.strptime(BROADCAST_TIME, "%H:%M").time()
         )
         logger.info(f"✅ Ежедневная рассылка настроена на {BROADCAST_TIME}")
+        
+        # Очистка устаревших предложений каждые 10 минут
+        job_queue.run_repeating(cleanup_old_proposals, interval=600, first=10)
     else:
         logger.error("❌ JobQueue не доступна")
     
