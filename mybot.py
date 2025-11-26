@@ -31,6 +31,9 @@ SUBGROUPS = ["1 п/гр", "2 п/гр", "Обе подгруппы"]
 # Время рассылки по умолчанию
 BROADCAST_TIME = "19:00"
 
+# Импортируем базу данных
+from database import db
+
 # Виртуальная валюта пользователей
 USER_BALANCE = {}
 
@@ -47,65 +50,6 @@ def get_academic_year_start():
     now = datetime.now()
     return datetime(now.year, 9, 1) if now.month >= 9 else datetime(now.year - 1, 9, 1)
 
-# Функции для работы с виртуальной валютой
-def get_user_balance(user_id):
-    """Получить баланс пользователя"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else 1000  # Стартовый баланс 1000
-    except Exception as e:
-        logger.error(f"Ошибка при получении баланса пользователя {user_id}: {e}")
-        return 1000
-
-def update_user_balance(user_id, amount):
-    """Обновить баланс пользователя"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Проверяем существование колонки balance
-        cursor.execute("PRAGMA table_info(users)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        if 'balance' not in columns:
-            cursor.execute('ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 1000')
-            logger.info("Добавлена колонка balance в таблицу users")
-        
-        cursor.execute('UPDATE users SET balance = ? WHERE user_id = ?', (amount, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении баланса пользователя {user_id}: {e}")
-        return False
-
-def add_user_balance(user_id, amount):
-    """Добавить сумму к балансу пользователя"""
-    current_balance = get_user_balance(user_id)
-    new_balance = current_balance + amount
-    return update_user_balance(user_id, new_balance)
-
-def get_week_for_date(target_date=None):
-    """Расчет учебной недели для конкретной даты"""
-    if target_date is None:
-        target_date = datetime.now()
-    
-    start_date = get_academic_year_start()
-    
-    # Корректируем начальную дату для осеннего семестра
-    if target_date.month < 9:
-        start_date = datetime(target_date.year - 1, 9, 1)
-    
-    delta = target_date - start_date
-    week_number = delta.days // 7 + 1
-    is_even_week = week_number % 2 == 0
-    
-    return week_number, "Четная" if is_even_week else "Нечетная"
-
 # Расчет текущей учебной недели
 def get_current_week():
     start_date = get_academic_year_start()
@@ -115,6 +59,22 @@ def get_current_week():
         start_date = datetime(now.year - 1, 9, 1)
     
     delta = now - start_date
+    week_number = delta.days // 7 + 1
+    is_even_week = week_number % 2 == 0
+    
+    return week_number, "Четная" if is_even_week else "Нечетная"
+
+def get_week_for_date(target_date=None):
+    """Расчет учебной недели для конкретной даты"""
+    if target_date is None:
+        target_date = datetime.now()
+    
+    start_date = get_academic_year_start()
+    
+    if target_date.month < 9:
+        start_date = datetime(target_date.year - 1, 9, 1)
+    
+    delta = target_date - start_date
     week_number = delta.days // 7 + 1
     is_even_week = week_number % 2 == 0
     
@@ -702,446 +662,72 @@ for group in GROUPS:
     if group not in SCHEDULE:
         SCHEDULE[group] = SCHEDULE["ПСН-24"]
 
-# Инициализация базы данных
-def init_db():
-    conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-    cursor = conn.cursor()
-    
-    # Создаем таблицу для браков
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS marriages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user1_id INTEGER NOT NULL,
-            user2_id INTEGER NOT NULL,
-            user1_username TEXT,
-            user2_username TEXT,
-            chat_id INTEGER NOT NULL,
-            married_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-            is_active BOOLEAN DEFAULT TRUE,
-            last_seks_date TEXT,
-            UNIQUE(user1_id, user2_id, chat_id)
-        )
-    ''')
-    
-    # Создаем таблицу для предложений брака
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS marriage_proposals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            proposer_id INTEGER NOT NULL,
-            target_id INTEGER NOT NULL,
-            chat_id INTEGER NOT NULL,
-            message_id INTEGER NOT NULL,
-            created_at DATETIME DEFAULT (datetime('now')),
-            is_active BOOLEAN DEFAULT TRUE
-        )
-    ''')
+# Функции для работы с виртуальной валютой
+def get_user_balance(user_id):
+    """Получить баланс пользователя"""
+    return db.get_user_balance(user_id)
 
-    # Создаем таблицу users с правильными колонками
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            group_name TEXT,
-            subgroup TEXT DEFAULT 'Обе подгруппы',
-            last_active DATETIME DEFAULT (datetime('now')),
-            is_banned BOOLEAN DEFAULT FALSE,
-            is_admin BOOLEAN DEFAULT FALSE,
-            is_main_admin BOOLEAN DEFAULT FALSE,
-            balance INTEGER DEFAULT 1000
-        )
-    ''')
-    
-    # Создаем таблицу chats с правильными колонками
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id INTEGER PRIMARY KEY,
-            chat_title TEXT,
-            added_date DATETIME DEFAULT (datetime('now')),
-            is_active BOOLEAN DEFAULT TRUE,
-            chat_group TEXT
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_users (
-            chat_id INTEGER,
-            user_id INTEGER,
-            group_name TEXT,
-            subgroup TEXT DEFAULT 'Обе подгруппы',
-            PRIMARY KEY (chat_id, user_id)
-        )
-    ''')
-    
-    # ИСПРАВЛЕННАЯ таблица admin_logs
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_username TEXT,
-            admin_user_id INTEGER,
-            action TEXT,
-            target_username TEXT,
-            target_user_id INTEGER,
-            timestamp DATETIME DEFAULT (datetime('now'))
-        )
-    ''')
-    # Проверяем и добавляем отсутствующие колонки в таблицу users
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if 'subgroup' not in columns:
-        cursor.execute('ALTER TABLE users ADD COLUMN subgroup TEXT DEFAULT "Обе подгруппы"')
-        logger.info("Добавлена колонка subgroup в таблицу users")
-    
-    if 'is_main_admin' not in columns:
-        cursor.execute('ALTER TABLE users ADD COLUMN is_main_admin BOOLEAN DEFAULT FALSE')
-        logger.info("Добавлена колонка is_main_admin в таблицу users")
-    
-    if 'balance' not in columns:
-        cursor.execute('ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 1000')
-        logger.info("Добавлена колонка balance в таблицу users")
-    
-    # Проверяем и добавляем отсутствующие колонки в таблицу chats
-    cursor.execute("PRAGMA table_info(chats)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if 'chat_group' not in columns:
-        cursor.execute('ALTER TABLE chats ADD COLUMN chat_group TEXT')
-        logger.info("Добавлена колонка chat_group в таблицу chats")
-    
-    # Проверяем и добавляем отсутствующие колонки в таблицу chat_users
-    cursor.execute("PRAGMA table_info(chat_users)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if 'subgroup' not in columns:
-        cursor.execute('ALTER TABLE chat_users ADD COLUMN subgroup TEXT DEFAULT "Обе подгруппы"')
-        logger.info("Добавлена колонка subgroup в таблицу chat_users")
-        
-    # Создаем индекс для улучшения производительности
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_marriages_chat ON marriages(chat_id, is_active)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_marriages_users ON marriages(user1_id, user2_id, is_active)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_proposals_created ON marriage_proposals(created_at)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_proposals_active ON marriage_proposals(is_active)')
-    
-    # Проверяем и добавляем отсутствующие колонки в таблицу admin_logs
-    cursor.execute("PRAGMA table_info(admin_logs)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if 'admin_username' not in columns:
-        cursor.execute('ALTER TABLE admin_logs ADD COLUMN admin_username TEXT')
-        logger.info("Добавлена колонка admin_username в таблицу admin_logs")
-    
-    if 'admin_user_id' not in columns:
-        cursor.execute('ALTER TABLE admin_logs ADD COLUMN admin_user_id INTEGER')
-        logger.info("Добавлена колонка admin_user_id в таблицу admin_logs")
-    
-    if 'action' not in columns:
-        cursor.execute('ALTER TABLE admin_logs ADD COLUMN action TEXT')
-        logger.info("Добавлена колонка action в таблицу admin_logs")
-    
-    if 'target_username' not in columns:
-        cursor.execute('ALTER TABLE admin_logs ADD COLUMN target_username TEXT')
-        logger.info("Добавлена колонка target_username в таблицу admin_logs")
-    
-    if 'target_user_id' not in columns:
-        cursor.execute('ALTER TABLE admin_logs ADD COLUMN target_user_id INTEGER')
-        logger.info("Добавлена колонка target_user_id в таблицу admin_logs")
-    
-    # Добавляем главного администратора в базу если его нет
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (MAIN_ADMIN_ID,))
-    if not cursor.fetchone():
-        cursor.execute('''
-            INSERT INTO users (user_id, username, first_name, group_name, is_admin, is_main_admin, balance)
-            VALUES (?, ?, ?, ?, TRUE, TRUE, 10000)
-        ''', (MAIN_ADMIN_ID, "bokalpivka", "Admin", "ПСН-24"))
-        logger.info("Главный администратор добавлен в базу")
-    
-    conn.commit()
-    conn.close()
-    logger.info("База данных инициализирована успешно")
+def update_user_balance(user_id, amount):
+    """Обновить баланс пользователя"""
+    return db.update_user_balance(user_id, amount)
 
-# Получение всех чатов с информацией о количестве участников
-def get_all_chats_with_info():
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT c.chat_id, c.chat_title, c.chat_group, 
-                   COUNT(cu.user_id) as user_count
-            FROM chats c
-            LEFT JOIN chat_users cu ON c.chat_id = cu.chat_id
-            WHERE c.is_active = TRUE
-            GROUP BY c.chat_id, c.chat_title, c.chat_group
-            ORDER BY c.chat_title
-        ''')
-        chats = cursor.fetchall()
-        conn.close()
-        return chats
-    except Exception as e:
-        logger.error(f"Ошибка при получении информации о чатах: {e}")
-        return []
-
-# ИСПРАВЛЕННАЯ функция логирования действий администратора
-def log_admin_action(admin_username, admin_user_id, action, target_username=None, target_user_id=None):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO admin_logs (admin_username, admin_user_id, action, target_username, target_user_id, timestamp)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        ''', (admin_username, admin_user_id, action, target_username, target_user_id))
-        conn.commit()
-        conn.close()
-        logger.info(f"Admin action logged: {admin_username} ({admin_user_id}) - {action}")
-    except Exception as e:
-        logger.error(f"Ошибка при логировании действия администратора: {e}")
+def add_user_balance(user_id, amount):
+    """Добавить сумму к балансу пользователя"""
+    return db.add_user_balance(user_id, amount)
 
 # Сохранение пользователя с подгруппой
 def save_user_with_subgroup(user_id, username, first_name, group_name, subgroup):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO users (user_id, username, first_name, group_name, subgroup, last_active)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        ''', (user_id, username, first_name, group_name, subgroup))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении пользователя {user_id}: {e}")
-        return False
-        
+    return db.save_user_with_subgroup(user_id, username, first_name, group_name, subgroup)
+
 # Получение пользователя
 def get_user(user_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-        return user
-    except Exception as e:
-        logger.error(f"Ошибка при получении пользователя {user_id}: {e}")
-        return None
+    return db.get_user(user_id)
 
 # Поиск пользователя по username
 def find_user_by_username(username):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
-        user = cursor.fetchone()
-        conn.close()
-        return user
-    except Exception as e:
-        logger.error(f"Ошибка при поиске пользователя по username {username}: {e}")
-        return None
+    return db.find_user_by_username(username)
 
 # Получение пользователей по группе
 def get_users_by_group(group_name):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE group_name = ? AND is_banned = FALSE', (group_name,))
-        users = cursor.fetchall()
-        conn.close()
-        return users
-    except Exception as e:
-        logger.error(f"Ошибка при получении пользователей группы {group_name}: {e}")
-        return []
+    return db.get_users_by_group(group_name)
 
-# Функции для работы с предложениями брака
-def create_marriage_proposal(proposer_id, target_id, chat_id, message_id):
-    """Создать предложение о браке"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Деактивируем старые предложения между этими пользователями
-        cursor.execute('''
-            UPDATE marriage_proposals 
-            SET is_active = FALSE 
-            WHERE proposer_id = ? AND target_id = ? AND chat_id = ?
-        ''', (proposer_id, target_id, chat_id))
-        
-        # Создаем новое предложение
-        cursor.execute('''
-            INSERT INTO marriage_proposals (proposer_id, target_id, chat_id, message_id, created_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
-        ''', (proposer_id, target_id, chat_id, message_id))
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"Предложение брака создано: {proposer_id} -> {target_id} в чате {chat_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при создании предложения брака: {e}")
-        return False
-
-def deactivate_marriage_proposal(proposal_id):
-    """Деактивировать предложение о браке"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE marriage_proposals 
-            SET is_active = FALSE 
-            WHERE id = ?
-        ''', (proposal_id,))
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"Предложение брака деактивировано: {proposal_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при деактивации предложения брака: {e}")
-        return False
-
-def get_active_proposal(proposer_id, target_id, chat_id):
-    """Получить активное предложение между пользователями"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT * FROM marriage_proposals 
-            WHERE proposer_id = ? AND target_id = ? AND chat_id = ? AND is_active = TRUE
-        ''', (proposer_id, target_id, chat_id))
-        
-        proposal = cursor.fetchone()
-        conn.close()
-        return proposal
-    except Exception as e:
-        logger.error(f"Ошибка при получении предложения брака: {e}")
-        return None
-
-def get_old_proposals(minutes=20):
-    """Получить устаревшие предложения"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Вычисляем время, до которого предложения считаются активными
-        time_threshold = datetime.now() - timedelta(minutes=minutes)
-        
-        cursor.execute('''
-            SELECT * FROM marriage_proposals 
-            WHERE is_active = TRUE AND datetime(created_at) < datetime(?)
-        ''', (time_threshold.strftime('%Y-%m-%d %H:%M:%S'),))
-        
-        old_proposals = cursor.fetchall()
-        conn.close()
-        return old_proposals
-    except Exception as e:
-        logger.error(f"Ошибка при получении устаревших предложений: {e}")
-        return []
-        
 # Получение всех пользователей
 def get_all_users():
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users ORDER BY last_active DESC')
-        users = cursor.fetchall()
-        conn.close()
-        return users
-    except Exception as e:
-        logger.error(f"Ошибка при получении всех пользователей: {e}")
-        return []
+    return db.get_all_users()
 
 # Получение активных пользователей
 def get_active_users():
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE is_banned = FALSE ORDER BY last_active DESC')
-        users = cursor.fetchall()
-        conn.close()
-        return users
-    except Exception as e:
-        logger.error(f"Ошибка при получении активных пользователей: {e}")
-        return []
+    return db.get_active_users()
 
 # Получение всех администраторов
 def get_all_admins():
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE is_admin = TRUE OR is_main_admin = TRUE OR user_id IN ({})'.format(','.join('?' for _ in ADMIN_IDS)), ADMIN_IDS)
-        admins = cursor.fetchall()
-        conn.close()
-        return admins
-    except Exception as e:
-        logger.error(f"Ошибка при получении администраторов: {e}")
-        return []
+    return db.get_all_admins()
 
 # Получение всех главных администраторов
 def get_main_admins():
     try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE is_main_admin = TRUE OR user_id = ?', (MAIN_ADMIN_ID,))
-        admins = cursor.fetchall()
-        conn.close()
-        return admins
+        users = db.get_all_users()
+        return [user for user in users if (len(user) > 8 and user[8]) or user[0] == MAIN_ADMIN_ID]
     except Exception as e:
         logger.error(f"Ошибка при получении главных администраторов: {e}")
         return []
 
 # Получение всех чатов
 def get_all_chats():
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM chats WHERE is_active = TRUE')
-        chats = cursor.fetchall()
-        conn.close()
-        return chats
-    except Exception as e:
-        logger.error(f"Ошибка при получении чатов: {e}")
-        return []
+    return db.get_all_chats()
 
 # Получение чатов по группе
 def get_chats_by_group(group_name):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT DISTINCT c.chat_id, c.chat_title 
-            FROM chats c
-            JOIN chat_users cu ON c.chat_id = cu.chat_id
-            WHERE cu.group_name = ? AND c.is_active = TRUE
-        ''', (group_name,))
-        chats = cursor.fetchall()
-        conn.close()
-        return chats
-    except Exception as e:
-        logger.error(f"Ошибка при получении чатов группы {group_name}: {e}")
-        return []
+    return db.get_chats_by_group(group_name)
 
 # Добавление чата
 def add_chat(chat_id, chat_title):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chats (chat_id, chat_title, added_date, is_active)
-            VALUES (?, ?, datetime('now'), TRUE)
-        ''', (chat_id, chat_title))
-        conn.commit()
-        conn.close()
-        logger.info(f"Чат добавлен: {chat_title} (ID: {chat_id})")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении чата {chat_id}: {e}")
-        return False
-        
+    return db.add_chat(chat_id, chat_title)
+
 # Установка группы для чата
 def set_chat_group(chat_id, group_name):
     try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('UPDATE chats SET chat_group = ? WHERE chat_id = ?', (group_name, chat_id))
         conn.commit()
@@ -1155,7 +741,7 @@ def set_chat_group(chat_id, group_name):
 # Получение группы чата
 def get_chat_group(chat_id):
     try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('SELECT chat_group FROM chats WHERE chat_id = ?', (chat_id,))
         result = cursor.fetchone()
@@ -1167,38 +753,16 @@ def get_chat_group(chat_id):
 
 # Сохранение пользователя чата с подгруппой
 def save_chat_user_with_subgroup(chat_id, user_id, group_name, subgroup):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chat_users (chat_id, user_id, group_name, subgroup)
-            VALUES (?, ?, ?, ?)
-        ''', (chat_id, user_id, group_name, subgroup))
-        conn.commit()
-        conn.close()
-        logger.info(f"Пользователь {user_id} добавлен в чат {chat_id} с группой {group_name} и подгруппой {subgroup}")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении пользователя чата {chat_id}: {e}")
-        return False
+    return db.save_chat_user_with_subgroup(chat_id, user_id, group_name, subgroup)
 
 # Получение группы пользователя в чате
 def get_chat_user_group(chat_id, user_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT group_name FROM chat_users WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception as e:
-        logger.error(f"Ошибка при получении группы пользователя чата {chat_id}: {e}")
-        return None
+    return db.get_chat_user_group(chat_id, user_id)
 
 # Получение подгруппы пользователя в чате
 def get_chat_user_subgroup(chat_id, user_id):
     try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('SELECT subgroup FROM chat_users WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         result = cursor.fetchone()
@@ -1210,98 +774,32 @@ def get_chat_user_subgroup(chat_id, user_id):
 
 # Получение основной группы чата (по большинству пользователей)
 def get_main_chat_group(chat_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT group_name, COUNT(*) as count 
-            FROM chat_users 
-            WHERE chat_id = ? 
-            GROUP BY group_name 
-            ORDER BY count DESC 
-            LIMIT 1
-        ''', (chat_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception as e:
-        logger.error(f"Ошибка при получении основной группы чата {chat_id}: {e}")
-        return None
+    return db.get_main_chat_group(chat_id)
 
 # Обновление активности
 def update_user_activity(user_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET last_active = datetime("now") WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении активности пользователя {user_id}: {e}")
+    return db.update_user_activity(user_id)
+
 # Бан пользователя
 def ban_user(user_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET is_banned = TRUE WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"Пользователь {user_id} забанен")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при бане пользователя {user_id}: {e}")
-        return False
+    return db.ban_user(user_id)
 
 # Разбан пользователя
 def unban_user(user_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET is_banned = FALSE WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"Пользователь {user_id} разбанен")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при разбане пользователя {user_id}: {e}")
-        return False
+    return db.unban_user(user_id)
 
 # Сделать администратором
 def make_admin(user_id):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET is_admin = TRUE WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"Пользователь {user_id} стал администратором")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при выдаче прав админа пользователю {user_id}: {e}")
-        return False
+    return db.make_admin(user_id)
 
 # Убрать права администратора
 def remove_admin(user_id):
-    try:
-        # Нельзя убрать права у главного администратора
-        if user_id == MAIN_ADMIN_ID or is_main_admin(user_id):
-            return False
-            
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET is_admin = FALSE WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"Пользователь {user_id} лишен прав администратора")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при снятии прав админа у пользователя {user_id}: {e}")
-        return False
+    return db.remove_admin(user_id)
 
 # Сделать главным администратором
 def make_main_admin(user_id):
     try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('UPDATE users SET is_main_admin = TRUE, is_admin = TRUE WHERE user_id = ?', (user_id,))
         conn.commit()
@@ -1315,11 +813,10 @@ def make_main_admin(user_id):
 # Убрать права главного администратора
 def remove_main_admin(user_id):
     try:
-        # Нельзя убрать права у основного главного администратора
         if user_id == MAIN_ADMIN_ID:
             return False
             
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('UPDATE users SET is_main_admin = FALSE WHERE user_id = ?', (user_id,))
         conn.commit()
@@ -1332,28 +829,12 @@ def remove_main_admin(user_id):
 
 # Обновление подгруппы пользователя
 def update_user_subgroup(user_id, subgroup):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Проверяем структуру таблицы
-        cursor.execute("PRAGMA table_info(users)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        # Обновляем подгруппу
-        cursor.execute('UPDATE users SET subgroup = ? WHERE user_id = ?', (subgroup, user_id))
-        conn.commit()
-        conn.close()
-        logger.info(f"Подгруппа пользователя {user_id} обновлена на {subgroup}")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении подгруппы пользователя {user_id}: {e}")
-        return False
+    return db.update_user_subgroup(user_id, subgroup)
 
 # Обновление подгруппы пользователя в чате
 def update_chat_user_subgroup(chat_id, user_id, subgroup):
     try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('UPDATE chat_users SET subgroup = ? WHERE chat_id = ? AND user_id = ?', (subgroup, chat_id, user_id))
         conn.commit()
@@ -1371,30 +852,16 @@ def is_main_admin(user_id):
             return True
         
         user = get_user(user_id)
-        if user and len(user) >= 9:  # Проверяем что есть достаточно колонок
-            return bool(user[8])  # user[8] - is_main_admin
+        if user and len(user) >= 9:
+            return bool(user[8])
         return False
     except Exception as e:
         logger.error(f"Ошибка при проверке прав главного админа для {user_id}: {e}")
         return False
 
-# Получение логов администраторов (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# Получение логов администраторов
 def get_admin_logs(limit=50):
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, admin_username, admin_user_id, action, target_username, target_user_id, timestamp 
-            FROM admin_logs 
-            ORDER BY datetime(timestamp) DESC 
-            LIMIT ?
-        ''', (limit,))
-        logs = cursor.fetchall()
-        conn.close()
-        return logs
-    except Exception as e:
-        logger.error(f"Ошибка при получении логов администраторов: {e}")
-        return []
+    return db.get_admin_logs(limit)
 
 # Проверка админа (безопасная версия)
 def is_admin(user_id):
@@ -1403,23 +870,35 @@ def is_admin(user_id):
             return True
         
         user = get_user(user_id)
-        if user and len(user) >= 7:  # Проверяем что есть достаточно колонок
-            return bool(user[6])  # user[6] - is_admin
+        if user and len(user) >= 7:
+            return bool(user[6])
         return False
     except Exception as e:
         logger.error(f"Ошибка при проверке прав админа для {user_id}: {e}")
         return False
 
-# Проверка бана (безопасная версия)
+# Проверка бана (ИСПРАВЛЕННАЯ версия)
 def is_banned(user_id):
     try:
+        # Главный администратор не может быть забанен
+        if user_id == MAIN_ADMIN_ID:
+            return False
+        
         user = get_user(user_id)
-        if user and len(user) >= 6:  # Проверяем что есть достаточно колонок
+        # Если пользователя нет в базе - считаем его не забаненным и автоматически регистрируем
+        if not user:
+            logger.info(f"Автоматическая регистрация нового пользователя: {user_id}")
+            # Автоматически создаем запись для нового пользователя
+            save_user_with_subgroup(user_id, "", "", "ПСН-24", "Обе подгруппы")
+            return False
+            
+        # Безопасная проверка наличия колонки is_banned
+        if len(user) >= 6:
             return bool(user[5])  # user[5] - is_banned
         return False
     except Exception as e:
         logger.error(f"Ошибка при проверке бана для {user_id}: {e}")
-        return False
+        return False  # В случае ошибки считаем пользователя не забаненным
 
 # День недели на русском
 def get_russian_weekday(date=None):
@@ -1437,7 +916,6 @@ def get_russian_weekday(date=None):
     }
     return weekdays[date.weekday()]
 
-
 # Функция для парсинга расписания и фильтрации пар по текущей неделе и подгруппе
 def parse_schedule(schedule_text, current_week, subgroup):
     if not schedule_text or not schedule_text.strip():
@@ -1451,36 +929,27 @@ def parse_schedule(schedule_text, current_week, subgroup):
             filtered_lines.append(line)
             continue
             
-        # Сохраняем номер пары
         line_with_number = line
         
-        # ФИЛЬТРАЦИЯ ПО ПОДГРУППАМ
         subgroup_match = False
         
         if subgroup == "Обе подгруппы":
-            # Для "Обе подгруппы" показываем ВСЕ строки
             subgroup_match = True
         elif subgroup == "1 п/гр":
-            # Для 1 подгруппы показываем строки где есть "1 п/гр" ИЛИ нет указания подгруппы
             if "1 п/гр" in line or ("1 п/гр" not in line and "2 п/гр" not in line):
                 subgroup_match = True
         elif subgroup == "2 п/гр":
-            # Для 2 подгруппы показываем строки где есть "2 п/гр" ИЛИ нет указания подгруппы
             if "2 п/гр" in line or ("1 п/гр" not in line and "2 п/гр" not in line):
                 subgroup_match = True
         
-        # Если строка не подходит по подгруппе - пропускаем
         if not subgroup_match:
             continue
         
-        # ФИЛЬТРАЦИЯ ПО НЕДЕЛЯМ (ИСПРАВЛЕННАЯ ЛОГИКА ИЗ СТАРОГО КОДА)
         if 'н.' in line:
-            # Разделяем на части до и после " - "
             if ' - ' in line:
                 subject_part = line.split(' - ')[0]
                 weeks_part = line.split(' - ')[1]
                 
-                # Проверяем все диапазоны недель в этой строке
                 week_ranges = weeks_part.split(', ')
                 current_week_present = False
                 
@@ -1488,35 +957,29 @@ def parse_schedule(schedule_text, current_week, subgroup):
                     if 'н' in week_range:
                         week_str = week_range.split(' н')[0].strip()
                         if '-' in week_str:
-                            # Диапазон недель (например, "1-13")
                             try:
                                 start_week, end_week = map(int, week_str.split('-'))
                                 if start_week <= current_week <= end_week:
                                     current_week_present = True
                                     break
                             except ValueError:
-                                # Если не удалось распарсить диапазон, оставляем строку
                                 current_week_present = True
                                 break
                         else:
-                            # Одиночные недели (например, "1,3,5")
                             try:
                                 weeks = [int(w.strip()) for w in week_str.split(',')]
                                 if current_week in weeks:
                                     current_week_present = True
                                     break
                             except ValueError:
-                                # Если не удалось распарсить недели, оставляем строку
                                 current_week_present = True
                                 break
                 
                 if current_week_present:
                     filtered_lines.append(line_with_number)
             else:
-                # Если нет разделителя " - ", но есть "н.", оставляем строку
                 filtered_lines.append(line_with_number)
         else:
-            # Если строка не содержит информации о неделях, оставляем её
             filtered_lines.append(line_with_number)
     
     result = '\n'.join(filtered_lines)
@@ -1525,151 +988,43 @@ def parse_schedule(schedule_text, current_week, subgroup):
 # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С БРАКАМИ ====================
 
 def create_marriage(user1_id, user1_username, user2_id, user2_username, chat_id):
-    """Создать брак"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Проверяем, не состоят ли уже пользователи в браке в этом чате
-        cursor.execute('''
-            SELECT * FROM marriages 
-            WHERE chat_id = ? AND is_active = TRUE 
-            AND ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
-        ''', (chat_id, user1_id, user2_id, user2_id, user1_id))
-        
-        existing_marriage = cursor.fetchone()
-        if existing_marriage:
-            conn.close()
-            return False, "Эти пользователи уже состоят в браке!"
-        
-        # Создаем брак
-        cursor.execute('''
-            INSERT INTO marriages (user1_id, user2_id, user1_username, user2_username, chat_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user1_id, user2_id, user1_username, user2_username, chat_id))
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"Брак создан: {user1_id} и {user2_id} в чате {chat_id}")
-        return True, "Брак успешно создан!"
-    except Exception as e:
-        logger.error(f"Ошибка при создании брака: {e}")
-        return False, "Ошибка при создании брака"
+    return db.create_marriage(user1_id, user1_username, user2_id, user2_username, chat_id)
 
 def break_marriage(user1_id, user2_id, chat_id):
-    """Расторгнуть брак"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE marriages 
-            SET is_active = FALSE 
-            WHERE chat_id = ? AND is_active = TRUE 
-            AND ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
-        ''', (chat_id, user1_id, user2_id, user2_id, user1_id))
-        
-        rows_affected = cursor.rowcount
-        conn.commit()
-        conn.close()
-        
-        if rows_affected > 0:
-            logger.info(f"Брак расторгнут: {user1_id} и {user2_id} в чате {chat_id}")
-            return True, "Брак расторгнут!"
-        else:
-            return False, "Брак не найден!"
-    except Exception as e:
-        logger.error(f"Ошибка при расторжении брака: {e}")
-        return False, "Ошибка при расторжении брака"
+    return db.break_marriage(user1_id, user2_id, chat_id)
 
 def get_marriage(user_id, chat_id):
-    """Получить информацию о браке пользователя в чате"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT * FROM marriages 
-            WHERE chat_id = ? AND is_active = TRUE 
-            AND (user1_id = ? OR user2_id = ?)
-        ''', (chat_id, user_id, user_id))
-        
-        marriage = cursor.fetchone()
-        conn.close()
-        return marriage
-    except Exception as e:
-        logger.error(f"Ошибка при получении брака: {e}")
-        return None
+    return db.get_marriage(user_id, chat_id)
 
 def get_chat_marriages(chat_id):
-    """Получить все активные браки в чате"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT * FROM marriages 
-            WHERE chat_id = ? AND is_active = TRUE 
-            ORDER BY married_date DESC
-        ''', (chat_id,))
-        
-        marriages = cursor.fetchall()
-        conn.close()
-        return marriages
-    except Exception as e:
-        logger.error(f"Ошибка при получении браков чата: {e}")
-        return []
+    return db.get_chat_marriages(chat_id)
 
 def set_last_seks_date(marriage_id, date_str):
-    """Установить дату последнего секса для брака"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE marriages 
-            SET last_seks_date = ? 
-            WHERE id = ?
-        ''', (date_str, marriage_id))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при установке даты секса: {e}")
-        return False
+    return db.set_last_seks_date(marriage_id, date_str)
 
 def get_last_seks_date(marriage_id):
-    """Получить дату последнего секса для брака"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT last_seks_date FROM marriages WHERE id = ?', (marriage_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception as e:
-        logger.error(f"Ошибка при получении даты секса: {e}")
-        return None
+    return db.get_last_seks_date(marriage_id)
 
 def get_user_active_proposals(user_id, chat_id):
-    """Получить активные предложения пользователя в чате"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT * FROM marriage_proposals 
-            WHERE proposer_id = ? AND chat_id = ? AND is_active = TRUE
-        ''', (user_id, chat_id))
-        
-        proposals = cursor.fetchall()
-        conn.close()
-        return proposals
-    except Exception as e:
-        logger.error(f"Ошибка при получении активных предложений пользователя: {e}")
-        return []
+    return db.get_user_active_proposals(user_id, chat_id)
+
+def create_marriage_proposal(proposer_id, target_id, chat_id, message_id):
+    return db.create_marriage_proposal(proposer_id, target_id, chat_id, message_id)
+
+def deactivate_marriage_proposal(proposal_id):
+    return db.deactivate_marriage_proposal(proposal_id)
+
+def get_active_proposal(proposer_id, target_id, chat_id):
+    return db.get_active_proposal(proposer_id, target_id, chat_id)
+
+def get_old_proposals(minutes=20):
+    return db.get_old_proposals(minutes)
+
+def get_all_chats_with_info():
+    return db.get_all_chats_with_info()
+
+def log_admin_action(admin_username, admin_user_id, action, target_username=None, target_user_id=None):
+    return db.log_admin_action(admin_username, admin_user_id, action, target_username, target_user_id)
 
 # Функции для работы с закрепленными сообщениями расписания
 async def unpin_old_schedule(context: ContextTypes.DEFAULT_TYPE, chat_id):
@@ -1683,14 +1038,12 @@ async def unpin_old_schedule(context: ContextTypes.DEFAULT_TYPE, chat_id):
             except Exception as e:
                 logger.warning(f"Не удалось открепить старое сообщение в чате {chat_id}: {e}")
             
-            # Удаляем сообщение если это возможно
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
                 logger.info(f"Удалено старое сообщение с расписанием в чате {chat_id}")
             except Exception as e:
                 logger.warning(f"Не удалось удалить старое сообщение в чате {chat_id}: {e}")
             
-            # Удаляем из словаря
             del PINNED_SCHEDULE_MESSAGES[chat_id]
     except Exception as e:
         logger.error(f"Ошибка при откреплении старого расписания в чате {chat_id}: {e}")
@@ -1707,6 +1060,44 @@ async def pin_new_schedule(context: ContextTypes.DEFAULT_TYPE, chat_id, message_
         logger.info(f"Закреплено новое сообщение с расписанием в чате {chat_id}")
     except Exception as e:
         logger.error(f"Ошибка при закреплении расписания в чате {chat_id}: {e}")
+
+# Команда для сброса банов
+async def reset_bans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Разрешаем только главному администратору
+    if user.id != MAIN_ADMIN_ID:
+        await update.message.reply_text("❌ Эта команда доступна только главному администратору!")
+        return
+    
+    try:
+        # Сбрасываем все баны
+        users = get_all_users()
+        for user_data in users:
+            unban_user(user_data[0])
+        
+        await update.message.reply_text("✅ Все баны сброшены! Пользователи разблокированы.")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при сбросе банов: {e}")
+        await update.message.reply_text("❌ Ошибка при сбросе банов!")
+
+# Команда для принудительной регистрации
+async def register_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    try:
+        if save_user_with_subgroup(user.id, user.username, user.first_name, "ПСН-24", "Обе подгруппы"):
+            await update.message.reply_text(
+                "✅ Вы зарегистрированы в системе!\n"
+                "Теперь вы можете использовать бота.\n"
+                "Используйте /group чтобы выбрать свою группу."
+            )
+        else:
+            await update.message.reply_text("❌ Ошибка при регистрации!")
+    except Exception as e:
+        logger.error(f"Ошибка при регистрации: {e}")
+        await update.message.reply_text("❌ Ошибка при регистрации!")
 
 # Команда /game - игровое меню
 async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2277,7 +1668,7 @@ async def give_money_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("❌ Ошибка при выдаче монет!")
 
-# Главное меню (ОБНОВЛЕННОЕ - БЕЗ ИГРОВОГО ЦЕНТРА)
+# Главное меню
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверка на групповой чат
     if update.effective_chat.type in ['group', 'supergroup']:
@@ -3054,7 +2445,7 @@ async def handle_cancel_proposal(query, context):
     
     try:
         # Получаем информацию о предложении
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
+        conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM marriage_proposals WHERE id = ?', (proposal_id,))
         proposal = cursor.fetchone()
@@ -3157,7 +2548,6 @@ async def cleanup_old_proposals(context: ContextTypes.DEFAULT_TYPE):
                 
     except Exception as e:
         logger.error(f"Ошибка при очистке устаревших предложений: {e}")
-
 
 # Показать выбор подгруппы
 async def show_subgroup_selection(query, context):
@@ -3293,41 +2683,6 @@ async def show_user_info(query, user):
         info_text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
     )
-    
-    # Команда для отладки структуры базы данных
-async def debug_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_main_admin(user.id):
-        return
-    
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Получаем структуру таблицы users
-        cursor.execute("PRAGMA table_info(users)")
-        columns = cursor.fetchall()
-        
-        debug_text = "📊 Структура таблицы users:\n\n"
-        for col in columns:
-            debug_text += f"Column {col[0]}: {col[1]} (type: {col[2]})\n"
-        
-        # Получаем данные текущего пользователя
-        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user.id,))
-        user_data = cursor.fetchone()
-        
-        debug_text += f"\n📋 Ваши данные:\n"
-        if user_data:
-            for i, value in enumerate(user_data):
-                debug_text += f"user_data[{i}] = {value}\n"
-        
-        conn.close()
-        
-        await update.message.reply_text(debug_text)
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-
 
 # Показать текущую неделю
 async def show_current_week(query):
@@ -3345,25 +2700,6 @@ async def show_current_week(query):
         message,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
     )
-
-def debug_user_structure(user_id):
-    """Временная функция для отладки структуры пользователя"""
-    try:
-        conn = sqlite3.connect('university_bot.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-        
-        if user:
-            print(f"DEBUG User {user_id} structure:")
-            for i, value in enumerate(user):
-                print(f"  user[{i}] = {value} (type: {type(value)})")
-            return user
-        return None
-    except Exception as e:
-        print(f"DEBUG Error: {e}")
-        return None
 
 # Показать расписание на сегодня с учетом подгруппы (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 async def show_today_schedule(query, user):
@@ -3455,7 +2791,7 @@ async def show_bell_schedule(query):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
     )
 
-# Админ-панель (ОБНОВЛЕННАЯ ВЕРСИЯ)
+# Админ-панель
 async def show_admin_panel(query, user):
     if not is_admin(user.id):
         await query.edit_message_text("Доступ запрещен!")
@@ -3467,6 +2803,7 @@ async def show_admin_panel(query, user):
         [InlineKeyboardButton("📅 Рассылка расписания", callback_data="admin_schedule_broadcast")],
         [InlineKeyboardButton("🔨 Забанить студента", callback_data="admin_ban")],
         [InlineKeyboardButton("🔓 Разбанить студента", callback_data="admin_unban")],
+        [InlineKeyboardButton("🔄 Сбросить все баны", callback_data="admin_reset_bans")],
     ]
     
     # Только главный админ может назначать админов
@@ -4261,11 +3598,8 @@ async def start_give_money(query, context):
 
 # Обновленная функция рассылки расписания с учетом подгруппы и закрепления сообщений
 async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
-    # Используем ЗАВТРАШНЮЮ дату для расчета недели
     tomorrow = datetime.now() + timedelta(days=1)
     weekday = get_russian_weekday(tomorrow)
-    
-    # ВАЖНО: используем ЗАВТРАШНЮЮ дату для расчета недели
     week_number, week_type = get_week_for_date(tomorrow)
     
     logger.info(f"🔄 Начинаю ежедневную рассылку расписания на {tomorrow.strftime('%d.%m.%Y')} ({weekday}) - {week_type} неделя №{week_number}")
@@ -4337,7 +3671,7 @@ def get_filtered_schedule(group_name, weekday, week_type, current_week, subgroup
         return filtered_schedule
     return "На этот день пар нет! 🎉"
     
-    # Обработчик выбора подгруппы
+# Обработчик выбора подгруппы
 async def handle_subgroup_selection(query, context):
     user = query.from_user
     subgroup = query.data.replace("subgroup_", "")
@@ -4356,19 +3690,14 @@ async def handle_subgroup_selection(query, context):
 
 # Обработчик всех сообщений
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Игнорируем сообщения из групповых чатов (кроме команды /start и /group)
-    if (update.effective_chat.type in ['group', 'supergroup'] and 
-        not update.message.text.startswith('/start') and 
-        not update.message.text.startswith('/group') and
-        not update.message.text.startswith('/givevip') and
-        not update.message.text.startswith('/takevip') and
-        not update.message.text.startswith('/zakladka') and
-        not update.message.text.startswith('/gangbang') and
-        not update.message.text.startswith('/game') and
-        not update.message.text.startswith('/givemoney')):
-        return
-    
     user = update.effective_user
+    
+    # Автоматически регистрируем пользователя если его нет в базе
+    user_data = get_user(user.id)
+    if not user_data:
+        logger.info(f"Автоматическая регистрация нового пользователя: {user.id}")
+        save_user_with_subgroup(user.id, user.username, user.first_name, "ПСН-24", "Обе подгруппы")
+    
     update_user_activity(user.id)
 
 # Обработчик ошибок
@@ -4476,6 +3805,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_ban_user(query, context)
         elif query.data == "admin_unban":
             await start_unban_user(query, context)
+        elif query.data == "admin_reset_bans":
+            await reset_bans_command(update, context)
         elif query.data == "admin_make_admin":
             await start_make_admin(query, context)
         elif query.data == "admin_remove_admin":
@@ -4514,10 +3845,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     # Добавляем более детальное логирование для отладки
     logging.getLogger('httpx').setLevel(logging.WARNING)
-    init_db()
+    
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем новые команды
+    application.add_handler(CommandHandler("resetbans", reset_bans_command))
+    application.add_handler(CommandHandler("register", register_me_command))
     application.add_handler(CommandHandler("debugdb", debug_db_command))
     application.add_handler(CommandHandler("game", game_command))
     application.add_handler(CommandHandler("givemoney", give_money_command))
