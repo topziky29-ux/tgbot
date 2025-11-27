@@ -1,8 +1,10 @@
+
 # database.py
 import sqlite3
 import logging
 from datetime import datetime, timedelta
 import os
+from config import MAIN_ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +116,7 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_proposals_active ON marriage_proposals(is_active)')
         
         # Добавляем главного администратора если его нет
-        from main import MAIN_ADMIN_ID
+        MAIN_ADMIN_ID = 1246951810
         cursor.execute('SELECT * FROM users WHERE user_id = ?', (MAIN_ADMIN_ID,))
         if not cursor.fetchone():
             cursor.execute('''
