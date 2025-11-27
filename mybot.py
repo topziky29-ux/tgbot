@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Токен бота (используйте переменные окружения!)
-BOT_TOKEN = os.getenv('BOT_TOKEN', "8297386105:AAH3ombr86k2yJF3udsVnk_5Y46ZK1Y1DTc")
+BOT_TOKEN = "8297386105:AAH3ombr86k2yJF3udsVnk_5Y46ZK1Y1DTc"
 
 # ID главного администратора (ВАШ ID)
 MAIN_ADMIN_ID = 1246951810
@@ -3925,3 +3925,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
