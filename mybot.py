@@ -7,6 +7,7 @@ import asyncio
 import os
 import re
 import random
+from config import BOT_TOKEN, MAIN_ADMIN_ID, ADMIN_IDS, GROUPS, SUBGROUPS, BROADCAST_TIME
 
 # Настройка логирования
 logging.basicConfig(
