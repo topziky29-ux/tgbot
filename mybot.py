@@ -1689,12 +1689,18 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при проверке бана в главном меню: {e}")
     
+    # ПОЛУЧАЕМ ТЕКУЩУЮ ПОДГРУППУ ДЛЯ ОТОБРАЖЕНИЯ
+    user_data = get_user(user.id)
+    current_subgroup = "Обе подгруппы"
+    if user_data and len(user_data) > 4 and user_data[4]:
+        current_subgroup = user_data[4]
+    
     keyboard = [
         [InlineKeyboardButton("Информация о боте", callback_data="info")],
         [InlineKeyboardButton("Кто я?", callback_data="whoami")],
         [InlineKeyboardButton("Какая сейчас неделя?", callback_data="current_week")],
         [InlineKeyboardButton("Сменить группу", callback_data="change_group")],
-        [InlineKeyboardButton("Выбрать подгруппу", callback_data="select_subgroup")],
+        [InlineKeyboardButton(f"Выбрать подгруппу ({current_subgroup})", callback_data="select_subgroup")],  # ПОКАЗЫВАЕМ ТЕКУЩУЮ ПОДГРУППУ
         [InlineKeyboardButton("Расписание на сегодня", callback_data="schedule_today")],
         [InlineKeyboardButton("Расписание на завтра", callback_data="schedule_tomorrow")],
         [InlineKeyboardButton("🕒 Расписание звонков", callback_data="bell_schedule")],
@@ -1713,7 +1719,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text("Главное меню:", reply_markup=reply_markup)
     else:
         await update.message.reply_text("Главное меню:", reply_markup=reply_markup)
-
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Обработка добавления в группу
@@ -2635,6 +2640,8 @@ async def cleanup_old_proposals(context: ContextTypes.DEFAULT_TYPE):
 # Показать выбор подгруппы
 async def show_subgroup_selection(query, context):
     user = query.from_user
+    
+    # ОБНОВЛЯЕМ данные пользователя перед показом
     user_data = get_user(user.id)
     
     if not user_data or not user_data[3]:  # Проверяем что группа выбрана
@@ -2644,10 +2651,15 @@ async def show_subgroup_selection(query, context):
         )
         return
     
-    # ПРАВИЛЬНОЕ получение текущей подгруппы - индекс 10
+    # ПРАВИЛЬНОЕ получение текущей подгруппы - ОБНОВЛЯЕМ ДАННЫЕ
     current_subgroup = "Обе подгруппы"  # значение по умолчанию
-    if len(user_data) > 10 and user_data[10] and user_data[10] in SUBGROUPS:
-        current_subgroup = user_data[10]
+    
+    # ОБНОВЛЕННЫЙ КОД: правильно получаем подгруппу
+    if user_data and len(user_data) > 4:
+        current_subgroup = user_data[4] if user_data[4] else "Обе подгруппы"
+    
+    # ДОБАВИМ ОТЛАДОЧНУЮ ИНФОРМАЦИЮ
+    debug_info = f"\n\n🔍 Отладка: поле subgroup = '{current_subgroup}'"
     
     keyboard = []
     for subgroup in SUBGROUPS:
@@ -2662,7 +2674,8 @@ async def show_subgroup_selection(query, context):
     
     await query.edit_message_text(
         f"📚 Выберите вашу подгруппу:\n\n"
-        f"Текущая подгруппа: {current_subgroup}",
+        f"Текущая подгруппа: {current_subgroup}"
+        f"{debug_info}",
         reply_markup=reply_markup
     )
     
@@ -3759,47 +3772,41 @@ async def handle_subgroup_selection(query, context):
     user = query.from_user
     subgroup = query.data.replace("subgroup_", "")
     
-    logger.info(f"🔄 Пользователь {user.id} пытается изменить подгруппу на: {subgroup}")
+    logger.info(f"🔄 Пользователь {user.id} меняет подгруппу на: {subgroup}")
     
-    # ПРОБУЕМ РАЗНЫЕ СПОСОБЫ СОХРАНЕНИЯ
-    success = False
-    
-    # Способ 1: через функцию базы данных
+    # Сохраняем подгруппу
     success = update_user_subgroup(user.id, subgroup)
     
-    if not success:
-        # Способ 2: через полное обновление пользователя
-        success = save_user_with_subgroup(
-            user.id, 
-            user.username or "", 
-            user.first_name or "", 
-            "ПСН-24",  # временная группа
-            subgroup
-        )
-    
-    if not success:
-        # Способ 3: напрямую в базу данных
-        try:
-            conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
-            cursor = conn.cursor()
+    if success:
+        # ДАЕМ ВРЕМЯ БАЗЕ ОБНОВИТЬСЯ и ПЕРЕЗАГРУЖАЕМ ДАННЫЕ
+        await asyncio.sleep(0.5)
+        
+        # ПЕРЕЗАГРУЖАЕМ данные пользователя
+        user_data = get_user(user.id)
+        
+        if user_data and len(user_data) > 4:
+            actual_subgroup = user_data[4] if user_data[4] else "Обе подгруппы"
             
-            # Проверяем существование пользователя
-            cursor.execute('SELECT * FROM users WHERE user_id = ?', (user.id,))
-            if cursor.fetchone():
-                cursor.execute('UPDATE users SET subgroup = ? WHERE user_id = ?', (subgroup, user.id))
-            else:
-                cursor.execute(
-                    'INSERT INTO users (user_id, username, first_name, subgroup) VALUES (?, ?, ?, ?)',
-                    (user.id, user.username, user.first_name, subgroup)
+            if subgroup == actual_subgroup:
+                message = (
+                    f"✅ Подгруппа успешно изменена!\n\n"
+                    f"📚 Теперь вы в подгруппе: {subgroup}\n\n"
+                    f"Расписание будет показываться только для вашей подгруппы."
                 )
-            
-            conn.commit()
-            conn.close()
-            success = True
-            logger.info(f"✅ Подгруппа обновлена напрямую для пользователя {user.id}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при прямом обновлении подгруппы: {e}")
+            else:
+                message = (
+                    f"⚠️ Подгруппа изменена, но есть расхождение:\n\n"
+                    f"Выбрано: {subgroup}\n"
+                    f"В базе: {actual_subgroup}\n\n"
+                    f"Попробуйте обновить меню."
+                )
+        else:
+            message = f"✅ Подгруппа изменена на: {subgroup}"
+    else:
+        message = "❌ Ошибка при изменении подгруппы. Попробуйте еще раз."
     
+    # СРАЗУ ПОКАЗЫВАЕМ ОБНОВЛЕННОЕ МЕНЮ ВМЕСТО ПРОСТОГО СООБЩЕНИЯ
+    await show_subgroup_selection(query, context)
     # ПРОВЕРЯЕМ РЕЗУЛЬТАТ
     if success:
         # Даем время базе данных обновиться
@@ -3882,6 +3889,36 @@ async def check_db_permissions(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка проверки прав: {str(e)}")
 
+
+async def check_subgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить текущую подгруппу"""
+    user = update.effective_user
+    user_data = get_user(user.id)
+    
+    if not user_data:
+        await update.message.reply_text("❌ Вы не зарегистрированы! Используйте /start")
+        return
+    
+    # Правильно получаем подгруппу
+    subgroup = user_data[4] if len(user_data) > 4 and user_data[4] else "Обе подгруппы"
+    group_name = user_data[3] if len(user_data) > 3 else "Не выбрана"
+    
+    # Проверяем расписание для этой подгруппы
+    today = datetime.now()
+    weekday = get_russian_weekday(today)
+    week_number, week_type = get_current_week()
+    
+    sample_schedule = get_filtered_schedule(group_name, weekday, week_type, week_number, subgroup)
+    
+    message = (
+        f"👤 Ваша подгруппа: {subgroup}\n"
+        f"📚 Группа: {group_name}\n\n"
+        f"📅 Пример расписания на сегодня:\n"
+        f"{sample_schedule}\n\n"
+        f"🔍 Поле subgroup в базе: '{user_data[4] if len(user_data) > 4 else 'Нет поля'}'"
+    )
+    
+    await update.message.reply_text(message)
 # Обработчик всех сообщений
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -4043,6 +4080,7 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем новые команды
+    application.add_handler(CommandHandler("mysubgroup", check_subgroup_command))
     application.add_handler(CommandHandler("recreatedb", recreate_database))
     application.add_handler(CommandHandler("dbperms", check_db_permissions))
     application.add_handler(CommandHandler("testdb", test_db_command))
