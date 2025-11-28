@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Токен бота (используйте переменные окружения!)
-BOT_TOKEN = "8297386105:AAH3ombr86k2yJF3udsVnk_5Y46ZK1Y1DTc"
+BOT_TOKEN = os.getenv('BOT_TOKEN', "8297386105:AAH3ombr86k2yJF3udsVnk_5Y46ZK1Y1DTc")
 
 # ID главного администратора (ВАШ ID)
 MAIN_ADMIN_ID = 1246951810
@@ -3852,7 +3852,6 @@ def main():
     # Добавляем новые команды
     application.add_handler(CommandHandler("resetbans", reset_bans_command))
     application.add_handler(CommandHandler("register", register_me_command))
-    application.add_handler(CommandHandler("debugdb", debug_db_command))
     application.add_handler(CommandHandler("game", game_command))
     application.add_handler(CommandHandler("givemoney", give_money_command))
     
@@ -3925,4 +3924,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
