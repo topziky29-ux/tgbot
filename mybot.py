@@ -2751,10 +2751,8 @@ async def show_user_info(query, user):
         # Безопасное извлечение данных с правильными индексами
         group_name = user_data[3] if len(user_data) > 3 else "Не выбрана"
         
-        # ПРАВИЛЬНОЕ извлечение подгруппы - индекс 10
-        subgroup = "Обе подгруппы"  # значение по умолчанию
-        if len(user_data) > 10 and user_data[10] and user_data[10] in SUBGROUPS:
-            subgroup = user_data[10]
+        # 🟢 ПРАВИЛЬНОЕ извлечение подгруппы - индекс 4
+        subgroup = user_data[4] if len(user_data) > 4 and user_data[4] else "Обе подгруппы"
         
         admin_status = "✅ Да" if is_admin(user.id) else "❌ Нет"
         main_admin_status = "👑 Главный" if is_main_admin(user.id) else "✅ Обычный" if is_admin(user.id) else "❌ Нет"
@@ -2778,7 +2776,6 @@ async def show_user_info(query, user):
     await query.edit_message_text(
         info_text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="main_menu")]])
-    )
 
 # Показать текущую неделю
 async def show_current_week(query):
@@ -3712,10 +3709,8 @@ async def send_daily_schedule(context: ContextTypes.DEFAULT_TYPE):
         for user_data in users:
             user_id = user_data[0]
             
-            # ПРАВИЛЬНОЕ получение подгруппы пользователя - индекс 10
-            subgroup = "Обе подгруппы"  # значение по умолчанию
-            if len(user_data) > 10 and user_data[10] and user_data[10] in SUBGROUPS:
-                subgroup = user_data[10]
+            # 🟢 ПРАВИЛЬНОЕ получение подгруппы пользователя:
+            subgroup = user_data[4] if len(user_data) > 4 and user_data[4] else "Обе подгруппы"
             
             filtered_schedule = get_filtered_schedule(group_name, weekday, week_type, week_number, subgroup)
             
