@@ -1,4 +1,3 @@
-
 # database.py
 import sqlite3
 import logging
@@ -116,7 +115,6 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_proposals_active ON marriage_proposals(is_active)')
         
         # Добавляем главного администратора если его нет
-        MAIN_ADMIN_ID = 1246951810
         cursor.execute('SELECT * FROM users WHERE user_id = ?', (MAIN_ADMIN_ID,))
         if not cursor.fetchone():
             cursor.execute('''
@@ -135,15 +133,31 @@ class Database:
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, username, first_name, group_name, subgroup, last_active)
-                VALUES (?, ?, ?, ?, ?, datetime('now'))
-            ''', (user_id, username, first_name, group_name, subgroup))
+            
+            # Проверяем существование пользователя
+            cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+            existing_user = cursor.fetchone()
+            
+            if existing_user:
+                # Обновляем существующего пользователя
+                cursor.execute('''
+                    UPDATE users 
+                    SET username = ?, first_name = ?, group_name = ?, subgroup = ?, last_active = datetime('now')
+                    WHERE user_id = ?
+                ''', (username, first_name, group_name, subgroup, user_id))
+            else:
+                # Создаем нового пользователя
+                cursor.execute('''
+                    INSERT INTO users (user_id, username, first_name, group_name, subgroup, last_active)
+                    VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ''', (user_id, username, first_name, group_name, subgroup))
+            
             conn.commit()
             conn.close()
+            logger.info(f"✅ Пользователь {user_id} сохранен: группа={group_name}, подгруппа={subgroup}")
             return True
         except Exception as e:
-            logger.error(f"Ошибка при сохранении пользователя {user_id}: {e}")
+            logger.error(f"❌ Ошибка при сохранении пользователя {user_id}: {e}")
             return False
     
     def get_user(self, user_id):
@@ -317,7 +331,6 @@ class Database:
     def remove_admin(self, user_id):
         """Убрать права администратора"""
         try:
-            from main import MAIN_ADMIN_ID
             if user_id == MAIN_ADMIN_ID:
                 return False
                 
@@ -335,10 +348,16 @@ class Database:
     def get_all_admins(self):
         """Получить всех администраторов"""
         try:
-            from main import ADMIN_IDS
+            from config import ADMIN_IDS
             conn = self.get_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM users WHERE is_admin = TRUE OR is_main_admin = TRUE OR user_id IN ({})'.format(','.join('?' for _ in ADMIN_IDS)), ADMIN_IDS)
+            
+            placeholders = ','.join(['?'] * len(ADMIN_IDS))
+            query = f'''
+                SELECT * FROM users 
+                WHERE is_admin = TRUE OR is_main_admin = TRUE OR user_id IN ({placeholders})
+            '''
+            cursor.execute(query, ADMIN_IDS)
             admins = cursor.fetchall()
             conn.close()
             return admins
