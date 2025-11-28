@@ -1856,6 +1856,39 @@ async def seks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{user.first_name} 💘 У тебя будет секс:\n📅 {date_str} в {time_str}"
     )
 
+async def recreate_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Полное пересоздание базы данных"""
+    user = update.effective_user
+    if user.id != MAIN_ADMIN_ID:
+        await update.message.reply_text("❌ Только для главного админа!")
+        return
+    
+    try:
+        import os
+        import shutil
+        
+        # Создаем резервную копию
+        if os.path.exists('data/university_bot.db'):
+            backup_name = f"data/university_bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            shutil.copy2('data/university_bot.db', backup_name)
+        
+        # Удаляем старую БД
+        if os.path.exists('data/university_bot.db'):
+            os.remove('data/university_bot.db')
+        
+        # Переинициализируем базу
+        from database import db
+        db.init_db()
+        
+        await update.message.reply_text(
+            "✅ База данных полностью пересоздана!\n"
+            "Старая база сохранена в резервной копии.\n"
+            "Все пользователи будут регистрироваться заново."
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка пересоздания БД: {str(e)}")
+
 # Команда /drochka - статистика
 async def drochka_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -2001,6 +2034,55 @@ async def braki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(marriages_text)
 
+
+async def test_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тест работы базы данных"""
+    user = update.effective_user
+    
+    try:
+        # 1. Проверяем текущее состояние
+        user_data = get_user(user.id)
+        current_balance = get_user_balance(user.id)
+        current_subgroup = user_data[4] if user_data and len(user_data) > 4 else "Неизвестно"
+        
+        # 2. Пробуем сохранить новые данные
+        new_subgroup = "1 п/гр" if current_subgroup != "1 п/гр" else "2 п/гр"
+        new_balance = current_balance + 100
+        
+        # Сохраняем подгруппу
+        success1 = update_user_subgroup(user.id, new_subgroup)
+        
+        # Сохраняем баланс
+        success2 = update_user_balance(user.id, new_balance)
+        
+        # 3. Проверяем, что сохранилось
+        user_data_after = get_user(user.id)
+        balance_after = get_user_balance(user.id)
+        subgroup_after = user_data_after[4] if user_data_after and len(user_data_after) > 4 else "Ошибка"
+        
+        result_text = (
+            f"🧪 ТЕСТ БАЗЫ ДАННЫХ:\n\n"
+            f"ДО изменений:\n"
+            f"  Баланс: {current_balance}\n"
+            f"  Подгруппа: {current_subgroup}\n\n"
+            f"ПОПЫТКА сохранить:\n"
+            f"  Баланс: {new_balance}\n"
+            f"  Подгруппа: {new_subgroup}\n\n"
+            f"РЕЗУЛЬТАТ:\n"
+            f"  Подгруппа сохранена: {'✅' if success1 else '❌'}\n"
+            f"  Баланс сохранен: {'✅' if success2 else '❌'}\n\n"
+            f"ПОСЛЕ изменений:\n"
+            f"  Баланс: {balance_after}\n"
+            f"  Подгруппа: {subgroup_after}\n\n"
+            f"СОВПАДЕНИЕ:\n"
+            f"  Баланс: {'✅' if new_balance == balance_after else '❌'}\n"
+            f"  Подгруппа: {'✅' if new_subgroup == subgroup_after else '❌'}\n"
+        )
+        
+        await update.message.reply_text(result_text)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка теста: {str(e)}")
 # Команда для отмены своего предложения о браке
 async def otkaz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отменить свое предложение о браке"""
@@ -3677,17 +3759,128 @@ async def handle_subgroup_selection(query, context):
     user = query.from_user
     subgroup = query.data.replace("subgroup_", "")
     
-    if update_user_subgroup(user.id, subgroup):
-        await query.edit_message_text(
-            f"✅ Подгруппа изменена на: {subgroup}\n\n"
-            f"Теперь вы будете получать расписание только для выбранной подгруппы.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В главное меню", callback_data="main_menu")]])
+    logger.info(f"🔄 Пользователь {user.id} пытается изменить подгруппу на: {subgroup}")
+    
+    # ПРОБУЕМ РАЗНЫЕ СПОСОБЫ СОХРАНЕНИЯ
+    success = False
+    
+    # Способ 1: через функцию базы данных
+    success = update_user_subgroup(user.id, subgroup)
+    
+    if not success:
+        # Способ 2: через полное обновление пользователя
+        success = save_user_with_subgroup(
+            user.id, 
+            user.username or "", 
+            user.first_name or "", 
+            "ПСН-24",  # временная группа
+            subgroup
         )
+    
+    if not success:
+        # Способ 3: напрямую в базу данных
+        try:
+            conn = sqlite3.connect('data/university_bot.db', check_same_thread=False)
+            cursor = conn.cursor()
+            
+            # Проверяем существование пользователя
+            cursor.execute('SELECT * FROM users WHERE user_id = ?', (user.id,))
+            if cursor.fetchone():
+                cursor.execute('UPDATE users SET subgroup = ? WHERE user_id = ?', (subgroup, user.id))
+            else:
+                cursor.execute(
+                    'INSERT INTO users (user_id, username, first_name, subgroup) VALUES (?, ?, ?, ?)',
+                    (user.id, user.username, user.first_name, subgroup)
+                )
+            
+            conn.commit()
+            conn.close()
+            success = True
+            logger.info(f"✅ Подгруппа обновлена напрямую для пользователя {user.id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при прямом обновлении подгруппы: {e}")
+    
+    # ПРОВЕРЯЕМ РЕЗУЛЬТАТ
+    if success:
+        # Даем время базе данных обновиться
+        await asyncio.sleep(0.5)
+        
+        # Проверяем, что действительно сохранилось
+        user_data = get_user(user.id)
+        if user_data and len(user_data) > 4:
+            actual_subgroup = user_data[4]
+            status = "✅ УСПЕХ" if subgroup == actual_subgroup else "⚠️ ЧАСТИЧНЫЙ УСПЕХ"
+            
+            message = (
+                f"{status}\n\n"
+                f"Выбрана подгруппа: {subgroup}\n"
+                f"В базе данных: {actual_subgroup}\n\n"
+            )
+            
+            if subgroup == actual_subgroup:
+                message += "Теперь вы будете получать расписание только для выбранной подгруппы! 📚"
+            else:
+                message += "Подгруппа сохранена, но есть расхождение. Попробуйте проверить через /profile"
+        else:
+            message = "⚠️ Изменения применены, но не удалось проверить результат"
     else:
-        await query.edit_message_text(
-            "❌ Ошибка при изменении подгруппы. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="select_subgroup")]])
+        message = (
+            "❌ ОШИБКА СОХРАНЕНИЯ\n\n"
+            "Не удалось сохранить подгруппу. Возможные причины:\n"
+            "• Проблемы с базой данных\n"
+            "• Недостаточно прав для записи\n"
+            "• Ошибка подключения\n\n"
+            "Попробуйте позже или используйте /register"
         )
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В главное меню", callback_data="main_menu")]])
+    )
+
+
+async def check_db_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка прав доступа к базе данных"""
+    import os
+    import stat
+    
+    try:
+        # Проверяем папку data
+        data_dir = 'data'
+        data_exists = os.path.exists(data_dir)
+        data_writable = os.access(data_dir, os.W_OK) if data_exists else False
+        
+        # Проверяем файл БД
+        db_file = 'data/university_bot.db'
+        db_exists = os.path.exists(db_file)
+        db_writable = os.access(db_file, os.W_OK) if db_exists else False
+        
+        # Размер файла БД
+        db_size = os.path.getsize(db_file) if db_exists else 0
+        
+        # Права доступа
+        if db_exists:
+            db_stat = os.stat(db_file)
+            db_mode = stat.filemode(db_stat.st_mode)
+        else:
+            db_mode = "Файл не существует"
+        
+        result = (
+            f"🔐 ПРАВА ДОСТУПА К БАЗЕ ДАННЫХ:\n\n"
+            f"📁 Папка 'data':\n"
+            f"   Существует: {'✅ Да' if data_exists else '❌ Нет'}\n"
+            f"   Доступ на запись: {'✅ Да' if data_writable else '❌ Нет'}\n\n"
+            f"📄 Файл БД:\n"
+            f"   Существует: {'✅ Да' if db_exists else '❌ Нет'}\n"
+            f"   Доступ на запись: {'✅ Да' if db_writable else '❌ Нет'}\n"
+            f"   Размер: {db_size} байт\n"
+            f"   Права: {db_mode}\n"
+        )
+        
+        await update.message.reply_text(result)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка проверки прав: {str(e)}")
 
 # Обработчик всех сообщений
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3850,6 +4043,9 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем новые команды
+    application.add_handler(CommandHandler("recreatedb", recreate_database))
+    application.add_handler(CommandHandler("dbperms", check_db_permissions))
+    application.add_handler(CommandHandler("testdb", test_db_command))
     application.add_handler(CommandHandler("resetbans", reset_bans_command))
     application.add_handler(CommandHandler("register", register_me_command))
     application.add_handler(CommandHandler("game", game_command))
